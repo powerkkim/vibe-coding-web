@@ -28,17 +28,22 @@ function empty(): UsageTotals {
 }
 
 /** 모델 단가로 계산한 요청 1건의 예상 비용(USD). 모르는 모델이면 0. */
-export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens'>): number {
+export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens' | 'fast'>): number {
   const model = MODELS.find((m) => m.id === modelId)
   if (!model) return 0
   // 긴 프롬프트 판정은 캐시 토큰을 포함한 전체 입력 기준이다(Anthropic 가격표).
   const over = model.longPrompt && usage.promptTokens > model.longPrompt.overTokens
   const multiplier = over ? model.longPrompt!.multiplier : 1
+  // 빠른 모드는 입·출력 단가가 바뀌고, 캐시 배율은 그 단가 위에 그대로 적용된다.
+  const fast = usage.fast && model.fast
+  const inputRate = fast ? model.fast!.inputPerMTok : model.inputPerMTok
+  const outputRate = fast ? model.fast!.outputPerMTok : model.outputPerMTok
+  const cacheReadRate = model.cacheReadPerMTok * (inputRate / model.inputPerMTok)
   const uncached = usage.promptTokens - usage.cacheWriteTokens - usage.cacheReadTokens
-  const input = uncached * model.inputPerMTok
-    + usage.cacheWriteTokens * model.inputPerMTok * CACHE_WRITE_MULTIPLIER
-    + usage.cacheReadTokens * model.cacheReadPerMTok
-  return ((input + usage.completionTokens * model.outputPerMTok) * multiplier) / 1_000_000
+  const input = uncached * inputRate
+    + usage.cacheWriteTokens * inputRate * CACHE_WRITE_MULTIPLIER
+    + usage.cacheReadTokens * cacheReadRate
+  return ((input + usage.completionTokens * outputRate) * multiplier) / 1_000_000
 }
 
 export function loadUsage(): UsageTotals {

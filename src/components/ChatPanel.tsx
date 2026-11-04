@@ -300,7 +300,9 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, isLoading
                 /* Claude 메시지: 본문은 대화에 바로 보여 주고, 파일을 만든 답변에는 결과물 카드를 붙인다. 오류는 본문 대신 오류 문구만 보여준다. */
                 <div key={i} className="flex flex-col gap-2.5 min-w-0">
                   {!msg.content
-                    ? <Dots />
+                    ? (msg.thinking
+                        ? <div className="flex flex-col gap-1.5"><Dots /><div className="thinking-peek" aria-live="polite"><span>{msg.thinking}</span></div></div>
+                        : <Dots />)
                     : msg.content.startsWith('오류:')
                       ? <p role="alert" style={{ color: 'var(--err)', fontSize: 'var(--fs-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', paddingTop: 8 }}>{msg.content}</p>
                       : (<>

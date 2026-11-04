@@ -632,3 +632,53 @@
     }
   }
 }
+
+/* ── 모델 옵션 팝오버 ───────────────────────────────── */
+.mopt {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  width: min(340px, calc(100vw - 24px));
+  max-height: calc(100dvh - 80px); overflow-y: auto;
+  padding: 14px; display: flex; flex-direction: column; gap: 16px;
+  background: var(--bg-panel); color: var(--txt);
+  border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.14), 0 2px 6px rgba(0,0,0,0.06);
+}
+/* 폰: 버튼 위치와 상관없이 화면 가운데 고정 */
+@media (max-width: 640px) {
+  .mopt { position: fixed; top: 56px; left: 12px; right: 12px; width: auto; }
+}
+.mopt-head { display: flex; align-items: center; justify-content: space-between; font-weight: 600; font-size: var(--fs-md); }
+.mopt-reset { font-size: var(--fs-xs); color: var(--txt-3); text-decoration: underline; }
+.mopt-reset:hover { color: var(--txt); }
+.mopt-label { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--txt); margin: 0; }
+.mopt-desc { display: block; font-size: var(--fs-xs); color: var(--txt-3); line-height: 1.5; margin: 2px 0 8px; }
+.mopt-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; cursor: pointer; }
+.mopt-row .mopt-desc { margin-bottom: 0; }
+.mopt-seg { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--bg-card); border-radius: 10px; }
+.mopt-seg button {
+  flex: 1 0 auto; min-width: 44px; padding: 6px 8px; border-radius: 7px;
+  font-size: var(--fs-xs); color: var(--txt-2); display: flex; flex-direction: column; align-items: center; line-height: 1.25;
+}
+.mopt-seg button small { font-size: 10px; color: var(--txt-3); }
+.mopt-seg button:hover { color: var(--txt); }
+.mopt-seg button[aria-checked="true"] { background: var(--bg-panel); color: var(--txt); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+.mopt-switch {
+  appearance: none; flex-shrink: 0; width: 36px; height: 20px; margin-top: 2px; border-radius: 999px;
+  background: var(--border); position: relative; cursor: pointer; transition: background .15s;
+}
+.mopt-switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); transition: transform .15s;
+}
+.mopt-switch:checked { background: #2b5fd9; }
+.mopt-switch:checked::after { transform: translateX(16px); }
+.mopt-switch:disabled { opacity: .45; cursor: default; }
+.mopt-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .mopt-switch, .mopt-switch::after { transition: none; } }
+
+/* 답변 전 생각 요약 */
+.thinking-peek {
+  font-size: var(--fs-sm); color: var(--txt-3); line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  border-left: 2px solid var(--border); padding: 2px 0 2px 12px; max-height: 9.6em; overflow: hidden;
+  display: flex; flex-direction: column-reverse;
+}

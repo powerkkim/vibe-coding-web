@@ -12,6 +12,8 @@ export interface Message {
   files?: Record<string, string>
   projectType?: 'html' | 'react' | 'vue'
   images?: MessageImage[]
+  // 생성 중 생각 요약(모델 옵션 '생각 요약 보기'). 본문이 나오기 전까지만 보여주고 저장 전에 빠진다.
+  thinking?: string
   // 이 답변이 끝난 시점의 전체 프로젝트 파일. 버전 되돌리기에만 쓰고 API 로는 보내지 않는다.
   snapshot?: Record<string, string>
   // 응답 도중 오류로 끊긴 답변. 채팅에서 다시 시도 버튼을 띄운다.
@@ -27,6 +29,8 @@ export interface TokenUsage {
   cacheReadTokens: number
   completionTokens: number
   totalTokens: number
+  // 빠른 모드로 처리됐는지(응답 usage.speed). 예상 비용 계산에 쓴다.
+  fast?: boolean
   limitPerMin: number
   remainingPerMin: number
   resetInSeconds: number
@@ -44,17 +48,46 @@ export interface AIModel {
   cacheReadPerMTok: number
   // 프롬프트가 overTokens 를 넘으면 입·출력 단가에 multiplier 를 곱한다.
   longPrompt?: { overTokens: number; multiplier: number }
+  // 노력 수준 기본값(output_config.effort 를 생략했을 때 모델이 쓰는 값). 옵션 화면에 표시한다.
+  defaultEffort: Effort
+  // 빠른 모드(speed: "fast") 지원 시 그 단가. 없으면 빠른 모드를 쓸 수 없다.
+  fast?: { inputPerMTok: number; outputPerMTok: number }
 }
+
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export const EFFORTS: { id: Effort; label: string }[] = [
+  { id: 'low', label: '낮음' },
+  { id: 'medium', label: '보통' },
+  { id: 'high', label: '높음' },
+  { id: 'xhigh', label: '매우 높음' },
+  { id: 'max', label: '최대' },
+]
+
+/** 모델 옵션. 모델마다 따로 저장한다. */
+export interface ModelOptions {
+  // 없으면 모델 기본값(요청에서 생략)
+  effort?: Effort
+  // 빠른 모드. 지원 모델(fast 단가가 있는 모델)에서만 적용된다.
+  fast: boolean
+  // 생각 + 답변을 합친 최대 출력 토큰. 모든 모델 최대 128K.
+  maxTokens: number
+  // 생각 요약(thinking.display = "summarized")을 받아 답변 전까지 보여준다.
+  showThinking: boolean
+}
+
+export const MAX_TOKEN_CHOICES = [16000, 32000, 64000, 128000]
+export const DEFAULT_MODEL_OPTIONS: ModelOptions = { fast: false, maxTokens: 64000, showThinking: false }
 
 // 첫 항목이 기본 모델이다.
 // 단가 출처: Anthropic 공식 가격표(2026-10 기준). 가격이 바뀌면 여기만 고친다.
 export const MODELS: AIModel[] = [
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2 },
+  // 빠른 모드 단가: Anthropic Fast mode 문서(2026-11)
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2, defaultEffort: 'medium', fast: { inputPerMTok: 8, outputPerMTok: 40 } },
   // Fable 5.1: 최상위 모델. 생각(adaptive thinking)이 항상 켜져 있어 첫 글자가 나오기까지 조금 더 걸린다. 생각 블록은 화면에 표시하지 않는다.
-  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25 },
-  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1 },
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, defaultEffort: 'high' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, defaultEffort: 'high' },
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
-  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 } },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium' },
 ]
 
 const SYSTEM_PROMPT = `You are Vibe Coding AI — an expert frontend developer and product designer who builds multi-file web projects from natural language.
@@ -249,6 +282,9 @@ export async function* streamCode(
   // abort() 하면 스트림이 끊기고 반복이 예외를 던진다. 서버 쪽 생성은 cancelGeneration 으로 따로 멈춘다.
   signal: AbortSignal | undefined,
   generationId: string,
+  options: ModelOptions = DEFAULT_MODEL_OPTIONS,
+  // 생각 요약 조각. options.showThinking 일 때만 온다.
+  onThinking?: (text: string) => void,
 ): AsyncGenerator<string, void, unknown> {
   const currentContext = currentFiles && Object.keys(currentFiles).length > 0
     ? `\n\nThe user is refining their existing project. Current files:\n` +
@@ -257,12 +293,19 @@ export async function* streamCode(
         .join('\n\n')
     : ''
 
-  const useFallback = MODELS.find((m) => m.id === model)?.fallback ?? false
+  const info = MODELS.find((m) => m.id === model)
+  const fast = options.fast && !!info?.fast
+  // 빠른 모드를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 빠른 모드일 때는 fallback 을 쓰지 않는다.
+  const useFallback = (info?.fallback ?? false) && !fast
   const body = JSON.stringify({
     model,
     stream: true,
-    // 멀티 파일 프로젝트 전체를 한 응답에 담으므로 넉넉히 잡는다. 스트리밍이라 HTTP 타임아웃 대상이 아니다.
-    max_tokens: 64000,
+    // 생각과 답변을 합친 한도. 멀티 파일 프로젝트 전체를 한 응답에 담으므로 기본 64K. 스트리밍이라 HTTP 타임아웃 대상이 아니다.
+    max_tokens: options.maxTokens,
+    ...(options.effort ? { output_config: { effort: options.effort } } : {}),
+    ...(fast ? { speed: 'fast' } : {}),
+    // 생각은 항상 켜져 있다(adaptive). 요약을 받을 때만 display 를 지정한다.
+    ...(options.showThinking ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
     // 고정 프롬프트만 캐시한다. 파일 내용은 요청마다 바뀌어 캐시해도 적중하지 않는다.
     system: [
       { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
@@ -298,7 +341,7 @@ export async function* streamCode(
       if ((direct.status !== 429 && direct.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
       await sleep(START_RETRY_DELAYS_MS[attempt], signal)
     }
-    yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false)
+    yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false, onThinking)
     return
   }
 
@@ -314,7 +357,7 @@ export async function* streamCode(
     if ((res.status !== 429 && res.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
     await sleep(START_RETRY_DELAYS_MS[attempt], signal)
   }
-  yield* readGeneration(apiKey, generationId, res, onUsage, signal)
+  yield* readGeneration(apiKey, generationId, res, onUsage, signal, true, onThinking)
 }
 
 /** 브라우저를 닫는 등으로 놓친 생성을 처음부터 다시 받는다. 생성이 이미 끝났으면 저장된 결과를 한 번에 받는다. */
@@ -399,6 +442,7 @@ async function* readGeneration(
   signal: AbortSignal | undefined,
   // false 면 끊겨도 다시 요청하지 않는다(서버 없이 Anthropic 을 직접 부를 때).
   canResume = true,
+  onThinking?: (text: string) => void,
 ): AsyncGenerator<string, void, unknown> {
   const decoder = new TextDecoder()
   let buffer = ''
@@ -408,6 +452,7 @@ async function* readGeneration(
   const usage: Record<string, number> = {}
   let stopReason: string | undefined
   let stopExplanation: string | undefined
+  let speed: string | undefined
 
   for (;;) {
     let lost: unknown = new Error('서버와 연결이 끊겼습니다')
@@ -427,14 +472,18 @@ async function* readGeneration(
           if (!data) continue
           const event = JSON.parse(data)
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') yield event.delta.text
-          else if (event.type === 'message_start') Object.assign(usage, definedNumbers(event.message.usage))
-          else if (event.type === 'message_delta') {
+          else if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') onThinking?.(event.delta.thinking ?? '')
+          else if (event.type === 'message_start') {
+            Object.assign(usage, definedNumbers(event.message.usage))
+            speed = event.message.usage?.speed ?? speed
+          } else if (event.type === 'message_delta') {
             Object.assign(usage, definedNumbers(event.usage))
+            speed = event.usage?.speed ?? speed
             stopReason = event.delta.stop_reason ?? stopReason
             stopExplanation = event.delta.stop_details?.explanation ?? stopExplanation
           } else if (event.type === 'error') throw new GenerationError(event.error?.message ?? '생성 중 오류가 발생했습니다')
           else if (event.type === 'message_stop') {
-            reportUsage(usage, stopReason, stopExplanation, onUsage)
+            reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast')
             return
           }
         }
@@ -456,7 +505,7 @@ function definedNumbers(obj: Record<string, unknown> | undefined): Record<string
   return out
 }
 
-function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void) {
+function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void, fast = false) {
   if (stopReason === 'refusal') {
     throw new GenerationError(explanation ? `Claude가 요청을 거절했습니다: ${explanation}` : 'Claude가 요청을 거절했습니다')
   }
@@ -471,6 +520,7 @@ function reportUsage(usage: Record<string, number>, stopReason: string | undefin
     cacheReadTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,
+    fast,
     // Anthropic rate limit 헤더는 서버가 전달하지 않으므로 -1(표시 안 함)로 둔다.
     limitPerMin: -1,
     remainingPerMin: -1,

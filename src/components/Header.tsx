@@ -2,6 +2,8 @@
 import { ChevronDown, KeyRound, X, PanelLeft, Moon, Sun, SquarePen } from '../icons'
 import logo from '../logo.png'
 import { MODELS } from '../services/ai'
+import type { ModelOptions } from '../services/ai'
+import ModelOptionsMenu from './ModelOptionsMenu'
 import { useEscapeKey } from '../hooks/useEscapeKey'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 
@@ -10,6 +12,8 @@ interface Props {
   model: string
   onApiKeyChange: (key: string) => void
   onModelChange: (model: string) => void
+  modelOptions: ModelOptions
+  onModelOptionsChange: (options: ModelOptions) => void
   isEnvKey: boolean
   isMobile?: boolean
   sidebarOpen: boolean
@@ -29,7 +33,7 @@ const ENV_VAR = 'VITE_ANTHROPIC_API_KEY'
  * - 오른쪽: API 키 설정 모달, 테마 전환, 새 대화
  * - 모바일/데스크톱 반응형 레이아웃
  */
-export default function Header({ apiKey, model, onApiKeyChange, onModelChange, isEnvKey, isMobile, sidebarOpen, onToggleSidebar, theme, onToggleTheme, onNewChat, busy }: Props) {
+export default function Header({ apiKey, model, onApiKeyChange, onModelChange, modelOptions, onModelOptionsChange, isEnvKey, isMobile, sidebarOpen, onToggleSidebar, theme, onToggleTheme, onNewChat, busy }: Props) {
   const [showModal, setShowModal] = useState(false)  // API 키 설정 모달 표시 여부
   const [draft, setDraft] = useState('')  // 임시 입력 값 (저장 전)
   useEscapeKey(() => setShowModal(false), showModal)
@@ -86,6 +90,7 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, i
             </select>
             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none" style={{ color: 'var(--txt-3)' }} />
           </div>
+          <ModelOptionsMenu model={model} options={modelOptions} onChange={onModelOptionsChange} disabled={busy} />
         </div>
 
         <div className="flex items-center gap-1 flex-shrink-0">

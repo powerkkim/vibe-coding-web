@@ -23,7 +23,8 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import type { ModelOptions } from './services/ai'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
 import { addUsage, estimateCost, loadUsage, resetUsage } from './services/usage'
 
@@ -374,6 +375,30 @@ export default function App() {
     setActiveModel(nextModel)
     localStorage.setItem('vibe_model', nextModel)
   }
+
+  // 모델 옵션(노력 수준·빠른 모드·최대 출력·생각 요약). 모델마다 따로 기억한다.
+  const [allModelOptions, setAllModelOptions] = useState<Record<string, ModelOptions>>(() => {
+    try { return JSON.parse(localStorage.getItem('vibe_model_options') ?? '{}') ?? {} } catch { return {} }
+  })
+  const modelOptions: ModelOptions = { ...DEFAULT_MODEL_OPTIONS, ...allModelOptions[activeModel] }
+  const handleModelOptionsChange = (next: ModelOptions) => {
+    const all = { ...allModelOptions, [activeModel]: next }
+    setAllModelOptions(all)
+    try { localStorage.setItem('vibe_model_options', JSON.stringify(all)) } catch { /* 이번 세션만 유지 */ }
+  }
+  // 생각 요약을 받으면 본문이 나오기 전의 빈 답변 자리에 붙인다.
+  const thinkingRef = useRef('')
+  const handleThinking = (text: string) => {
+    thinkingRef.current += text
+    const thinking = thinkingRef.current
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (last?.role !== 'assistant' || last.content) return prev
+      const updated = [...prev]
+      updated[updated.length - 1] = { ...last, thinking }
+      return updated
+    })
+  }
   /**
    * AI 코드 생성 메인 로직
    * 
@@ -424,6 +449,7 @@ export default function App() {
     setMessages(history)
     setIsLoading(true)
     bufferRef.current = ''
+    thinkingRef.current = ''
     lastRealtimePatchRef.current = ''
     lastRealtimePatchAtRef.current = 0
     pendingRealtimePatchRef.current = null
@@ -447,7 +473,7 @@ export default function App() {
     try {
       const chunks = resume
         ? resumeCode(activeApiKey, generationId, recordUsage, controller.signal)
-        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, recordUsage, controller.signal, generationId)
+        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, recordUsage, controller.signal, generationId, modelOptions, handleThinking)
       for await (const chunk of chunks) {
         bufferRef.current += chunk
         // 응답이 시작되면 진행 중인 답변을 현재 답변으로 표시한다. 본문은 대화에 바로 나온다.
@@ -533,6 +559,7 @@ export default function App() {
           recordUsage,
           controller.signal,
           repairId,
+          modelOptions,
         )) {
           repairedRaw += chunk
         }
@@ -789,6 +816,8 @@ export default function App() {
           <Header
             apiKey={activeApiKey}
             model={activeModel}
+            modelOptions={modelOptions}
+            onModelOptionsChange={handleModelOptionsChange}
             onApiKeyChange={handleApiKeyChange}
             onModelChange={handleModelChange}
             isEnvKey={Boolean(envKey)}
