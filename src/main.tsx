@@ -15,3 +15,10 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </StrictMode>,
 )
+
+// PWA: 앱 화면 파일을 캐시해 설치·빠른 실행·오프라인 열기를 지원한다. 개발 서버에서는 등록하지 않는다(HMR 과 충돌).
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {})
+  })
+}
