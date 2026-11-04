@@ -1,6 +1,6 @@
 # Vibe Coding Web
 
-> v4 · 2026-11-05 · powerkkim 구성 (원본: guraking/vibe-coding-web)
+> v5 · 2026-11-05 · powerkkim 구성 (원본: guraking/vibe-coding-web)
 > 배포 주소: https://powerkkim.github.io/vibe-coding-web/
 
 AI 기반 프론트엔드 코드 생성 웹 애플리케이션입니다. 자연어로 설명하면 HTML / React / Vue 프로젝트를 즉시 생성하고 실시간으로 미리볼 수 있습니다.
@@ -118,7 +118,7 @@ git push origin main
 
 ## 사용 방법
 
-1. 상단에서 Claude 모델(Opus 5.5 / Sonnet 5.5 / Haiku 5.5)을 선택합니다.
+1. 상단에서 Claude 모델(Opus 5.5 / Fable 5.1 / Sonnet 5.5 / Haiku 5.5)을 선택합니다.
 2. 설정 모달에서 Anthropic API 키를 저장합니다.
 3. 채팅 입력창에 만들고 싶은 앱을 한국어 또는 영어로 설명합니다.
 4. 우측 미리보기 패널에서 결과를 확인하고, 추가 수정 요청을 입력합니다.

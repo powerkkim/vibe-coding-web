@@ -50,6 +50,8 @@ export interface AIModel {
 // 단가 출처: Anthropic 공식 가격표(2026-10 기준). 가격이 바뀌면 여기만 고친다.
 export const MODELS: AIModel[] = [
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2 },
+  // Fable 5.1: 최상위 모델. 생각(adaptive thinking)이 항상 켜져 있어 첫 글자가 나오기까지 조금 더 걸린다. 생각 블록은 화면에 표시하지 않는다.
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25 },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1 },
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 } },
