@@ -72,6 +72,7 @@ function save(totals: UsageTotals): void {
 export function addUsage(modelId: string, usage: TokenUsage): UsageTotals {
   const current = loadUsage()
   const cost = estimateCost(modelId, usage)
+  spendBalance(cost)
   const next: UsageTotals = {
     day: current.day,
     todayCost: current.todayCost + cost,
@@ -80,6 +81,46 @@ export function addUsage(modelId: string, usage: TokenUsage): UsageTotals {
   }
   save(next)
   return next
+}
+
+/**
+ * 추정 잔액. Anthropic 은 일반 API 키로 잔액을 조회하는 API 를 제공하지 않으므로,
+ * 사용자가 Console(Billing)에서 본 잔액을 입력하면 이후 예상 비용을 빼서 보여준다. 실제 청구액과 조금씩 어긋날 수 있다.
+ * 사용량 '초기화'와는 따로 관리한다.
+ */
+export interface Balance {
+  start: number   // 입력한 잔액(USD)
+  spent: number   // 입력 이후 예상 비용 합계
+  setAt: number
+}
+const BALANCE_KEY = 'vibe_balance'
+
+export function loadBalance(): Balance | null {
+  try {
+    const b = JSON.parse(localStorage.getItem(BALANCE_KEY) ?? 'null') as Balance | null
+    return b && Number.isFinite(b.start) && Number.isFinite(b.spent) ? b : null
+  } catch {
+    return null
+  }
+}
+
+export function setBalance(amount: number | null): Balance | null {
+  const b = amount === null ? null : { start: amount, spent: 0, setAt: Date.now() }
+  try {
+    if (b) localStorage.setItem(BALANCE_KEY, JSON.stringify(b))
+    else localStorage.removeItem(BALANCE_KEY)
+  } catch { /* 이번 세션만 유지 */ }
+  return b
+}
+
+function spendBalance(cost: number) {
+  const b = loadBalance()
+  if (!b) return
+  try { localStorage.setItem(BALANCE_KEY, JSON.stringify({ ...b, spent: b.spent + cost })) } catch { /* 무시 */ }
+}
+
+export function remainingBalance(b: Balance | null): number | null {
+  return b ? b.start - b.spent : null
 }
 
 export function resetUsage(): UsageTotals {

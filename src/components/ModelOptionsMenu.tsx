@@ -116,6 +116,10 @@ export default function ModelOptionsMenu({ model, options, onChange, disabled }:
               ))}
             </div>
           </section>
+
+          <p className="mopt-desc" style={{ margin: 0 }}>
+            대화 도중 노력 수준·빠른 모드·생각 요약을 바꾸면 대화 이력 캐시가 초기화되어, 바로 다음 요청의 입력 비용이 한 번 늘어납니다.
+          </p>
         </div>
       )}
     </div>

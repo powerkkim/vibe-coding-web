@@ -26,7 +26,8 @@ import type { PanelTab } from './components/PreviewPanel'
 import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
 import type { ModelOptions } from './services/ai'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
-import { addUsage, estimateCost, loadUsage, resetUsage } from './services/usage'
+import { addUsage, estimateCost, loadBalance, loadUsage, resetUsage, setBalance } from './services/usage'
+import type { Balance } from './services/usage'
 
 /**
  * HTML 마크업 판별 함수
@@ -47,8 +48,18 @@ function isLikelyMarkup(text: string): boolean {
 type ProjectType = 'html' | 'react' | 'vue'
 
 // 리파인 응답은 바뀐 파일만 담을 수 있으므로, 같은 종류의 프로젝트면 요청 직전 파일 위에 합친다. 종류가 바뀌면 응답 파일로 교체한다.
+/**
+ * 응답 파일을 현재 프로젝트 위에 합친다. 모델은 바뀐 파일만 출력한다.
+ * 유형이 바뀌었더라도 응답만으로 완성된 프로젝트가 아니면(바뀐 파일 일부만 온 경우) 기존 프로젝트에 합친다.
+ */
 function mergeFiles(base: { files: Record<string, string>; type: ProjectType }, files: Record<string, string>, type: ProjectType) {
-  return type === base.type ? { ...base.files, ...files } : files
+  if (type === base.type || Object.keys(base.files).length === 0) return { ...base.files, ...files }
+  return isValidGeneratedProject(files, type) ? files : { ...base.files, ...files }
+}
+/** mergeFiles 결과의 프로젝트 유형 */
+function mergedType(base: { files: Record<string, string>; type: ProjectType }, files: Record<string, string>, type: ProjectType): ProjectType {
+  if (type === base.type || Object.keys(base.files).length === 0) return type
+  return isValidGeneratedProject(files, type) ? type : base.type
 }
 
 function isValidGeneratedProject(files: Record<string, string>, projectType: 'html' | 'react' | 'vue'): boolean {
@@ -114,10 +125,13 @@ export default function App() {
   const [lastCost, setLastCost] = useState(0)
   const [usageTotals, setUsageTotals] = useState(loadUsage)
   // 요청 1건이 끝날 때마다 호출된다. 화면의 '이번' 값을 바꾸고 오늘·누적 합계에 더한다.
+  const [balance, setBalanceState] = useState<Balance | null>(() => loadBalance())
+  const handleBalanceChange = (amount: number | null) => setBalanceState(setBalance(amount))
   const recordUsage = (usage: TokenUsage) => {
     setTokenUsage(usage)
     setLastCost(estimateCost(activeModel, usage))
     setUsageTotals(addUsage(activeModel, usage))
+    setBalanceState(loadBalance())
   }
   // 대화에서 선택된 답변 위치와, 캔버스 탭 전환 요청
   const [answerIndex, setAnswerIndex] = useState<number | null>(null)
@@ -467,13 +481,16 @@ export default function App() {
     const controller = new AbortController()
     abortRef.current = controller
     generationIdRef.current = generationId
+    // 응답이 끝난 이유(onUsage 로 마지막에 한 번 온다). 잘린 응답이면 형식 보정 대신 '이어서 생성'을 안내한다.
+    let stopReason: string | undefined
+    const onUsage = (usage: TokenUsage) => { stopReason = usage.stopReason; recordUsage(usage) }
     let panelFocused = false
     // 생성 중 화면이 저절로 꺼져 연결이 끊기지 않게 한다. 미지원 브라우저·거부 시에는 없이 진행한다.
     const wakeLock = await navigator.wakeLock?.request('screen').catch(() => null)
     try {
       const chunks = resume
-        ? resumeCode(activeApiKey, generationId, recordUsage, controller.signal)
-        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, recordUsage, controller.signal, generationId, modelOptions, handleThinking)
+        ? resumeCode(activeApiKey, generationId, onUsage, controller.signal)
+        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking)
       for await (const chunk of chunks) {
         bufferRef.current += chunk
         // 응답이 시작되면 진행 중인 답변을 현재 답변으로 표시한다. 본문은 대화에 바로 나온다.
@@ -523,10 +540,14 @@ export default function App() {
       flushPendingRealtimePatch()
 
       let parsed = parseVibe(bufferRef.current)
+      // max_tokens: 출력 한도에 걸려 잘림 → 이어서 생성 가능. model_context_window_exceeded: 컨텍스트가 가득 참 → 이어서 생성 불가.
+      const truncated: Message['truncated'] = stopReason === 'max_tokens' ? 'output'
+        : stopReason === 'model_context_window_exceeded' ? 'context' : undefined
 
         // Auto-repair response format if model didn't generate valid code structure
       // 코드를 만들려다(<VIBE_FILE> 존재) 구조가 깨진 경우에만 보정한다. 태그가 없으면 일반 대화 답변이다.
-      if (bufferRef.current.includes('<VIBE_FILE') && !isValidGeneratedProject(mergeFiles(baseProjectRef.current, parsed.files, parsed.projectType), parsed.projectType)) {
+      // 잘린 응답은 보정해도 같은 한도에 또 걸리므로 보정하지 않는다(원문 전체를 다시 보내 비용만 두 배가 된다).
+      if (!truncated && bufferRef.current.includes('<VIBE_FILE') && !isValidGeneratedProject(mergeFiles(baseProjectRef.current, parsed.files, parsed.projectType), parsed.projectType)) {
         const repairPrompt = [
           '아래 원문 응답은 형식이 깨졌거나 코드가 부족합니다.',
           '반드시 <VIBE_FILE>, <VIBE_TYPE>, <VIBE_EXPLANATION> 형식으로만 다시 출력하세요.',
@@ -571,20 +592,32 @@ export default function App() {
         }
       }
 
-      const { files, explanation, projectType: pType } = parsed
+      const { files, explanation } = parsed
+      // 끝까지 받은(닫는 태그가 있는) 파일만 parseVibe 가 돌려주므로 잘린 응답이어도 완성된 파일은 반영한다.
+      const pType = mergedType(baseProjectRef.current, files, parsed.projectType)
       if (Object.keys(files).length > 0) {
-        const merged = mergeFiles(baseProjectRef.current, files, pType)
+        const merged = mergeFiles(baseProjectRef.current, files, parsed.projectType)
         projectFilesRef.current = merged
         setProjectFiles(merged)
         setProjectType(pType)
       }
+      const doneNames = Object.keys(files)
+      const truncatedNote = truncated === 'output'
+        ? `⚠️ 출력 한도(${Math.round(modelOptions.maxTokens / 1000)}K 토큰)에 도달해 응답이 잘렸습니다.` +
+          (doneNames.length ? `  \n완성된 파일: ${doneNames.join(', ')}` : '') +
+          `  \n'이어서 생성'을 누르거나, 모델 옵션에서 최대 출력을 늘려 다시 시도하세요.`
+        : truncated === 'context'
+          ? '⚠️ 대화가 모델의 컨텍스트 한도를 가득 채워 응답이 잘렸습니다. 새 대화에서 이어 가세요.'
+          : ''
+      const body = explanation || (bufferRef.current.includes('<VIBE_')
+        ? (truncated ? '' : '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.')
+        : bufferRef.current.trim())
       setMessages((prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = {
           role: 'assistant',
-          content: explanation || (bufferRef.current.includes('<VIBE_')
-            ? '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.'
-            : bufferRef.current.trim()),
+          content: [body, truncatedNote].filter(Boolean).join('\n\n'),
+          ...(truncated ? { truncated } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
           ...(Object.keys(files).length > 0 ? { snapshot: projectFilesRef.current, projectType: pType } : {}),
@@ -642,6 +675,12 @@ export default function App() {
     abortRef.current?.abort()
     const id = generationIdRef.current
     if (id) cancelGeneration(activeApiKey, id).catch(() => setStorageError('서버에서 진행 중인 생성을 멈추지 못했습니다'))
+  }
+
+  // 출력 한도에서 잘린 답변을 이어서 만든다. 완성된 파일은 이미 프로젝트에 반영돼 있고(현재 파일로 함께 전달),
+  // 모델에는 잘린 파일과 아직 못 만든 파일만 출력하게 한다.
+  const handleContinue = () => {
+    handleSend('끊긴 부분부터 이어서 만들어 줘. 이미 완성된 파일은 다시 출력하지 말고, 끊긴 파일과 아직 만들지 못한 파일만 전체 내용으로 출력해 줘.', [], messages)
   }
 
   // 실패한 마지막 질문·답 한 쌍을 빼고 같은 질문을 다시 보낸다.
@@ -836,10 +875,13 @@ export default function App() {
             onSend={handleSend}
             onStop={handleStop}
             onRetry={handleRetry}
+            onContinue={handleContinue}
             isLoading={isLoading}
             hasApiKey={!!activeApiKey}
             width={isMobile || !canvasOpen ? undefined : chatWidth}
             tokenUsage={tokenUsage}
+            balance={balance}
+            onBalanceChange={handleBalanceChange}
             lastCost={lastCost}
             usageTotals={usageTotals}
             onResetUsage={() => setUsageTotals(resetUsage())}

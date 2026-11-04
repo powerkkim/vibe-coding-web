@@ -3,7 +3,8 @@ import { ArrowUp, AlertCircle, FileText, ImagePlus, X, Square, History } from '.
 import AnswerView from './AnswerView'
 import type { Message, MessageImage, TokenUsage } from '../services/ai'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
-import { formatUsd } from '../services/usage'
+import { formatUsd, remainingBalance } from '../services/usage'
+import type { Balance } from '../services/usage'
 import type { UsageTotals } from '../services/usage'
 
 // 실제 잔액·청구액은 일반 API 키로 조회할 수 없어 Console 대시보드로 안내한다.
@@ -26,6 +27,8 @@ interface Props {
   onStop: () => void
   // 오류로 끊긴 마지막 답변의 질문을 다시 보낸다.
   onRetry: () => void
+  // 출력 한도에서 잘린 마지막 답변을 이어서 생성한다.
+  onContinue: () => void
   isLoading: boolean
   hasApiKey: boolean
   width?: number
@@ -34,6 +37,9 @@ interface Props {
   lastCost: number
   usageTotals: UsageTotals
   onResetUsage: () => void
+  // 추정 잔액(사용자가 입력한 잔액 − 이후 예상 비용). null 이면 미설정.
+  balance: Balance | null
+  onBalanceChange: (amount: number | null) => void
   // 결과물 카드 중 지금 캔버스에 연 답변. 그 카드를 강조한다.
   activeAnswerIndex: number | null
   onOpenAnswer: (index: number) => void
@@ -63,10 +69,19 @@ function Dots() {
   )
 }
 
-export default function ChatPanel({ messages, onSend, onStop, onRetry, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
+  // 잔액 입력 칸. null 이면 닫힘.
+  const [balanceDraft, setBalanceDraft] = useState<string | null>(null)
+  const remaining = remainingBalance(balance)
+  const saveBalance = () => {
+    const v = Number((balanceDraft ?? '').replace(/[$,\s]/g, ''))
+    if (balanceDraft?.trim() === '') onBalanceChange(null)
+    else if (Number.isFinite(v) && v >= 0) onBalanceChange(v)
+    setBalanceDraft(null)
+  }
   const bottomRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   // 보내기 전 이미지(🖼 버튼·붙여넣기·끌어다 놓기로 추가)
@@ -341,6 +356,12 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, isLoading
                         </div>
                         )}
                       </>)}
+                  {msg.truncated === 'output' && i === messages.length - 1 && !isLoading && (
+                    <button onClick={onContinue} className="self-start"
+                      style={{ height: 32, padding: '0 14px', border: '1px solid var(--border)', borderRadius: 999, background: 'var(--bg-panel)', color: 'var(--txt)', fontSize: 'var(--fs-md)', cursor: 'pointer' }}>
+                      이어서 생성
+                    </button>
+                  )}
                   {msg.failed && i === messages.length - 1 && !isLoading && (
                     <button onClick={onRetry} className="self-start"
                       style={{ height: 32, padding: '0 14px', border: '1px solid var(--border)', borderRadius: 999, background: 'var(--bg-panel)', color: 'var(--txt)', fontSize: 'var(--fs-md)', cursor: 'pointer' }}>
@@ -363,7 +384,7 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, isLoading
       {messages.length > 0 && composer}
 
       {/* 사용량: 이번 요청 + 이 브라우저의 오늘·누적 예상 비용. 비용은 단가로 계산한 근사값이다. */}
-      {(tokenUsage || usageTotals.totalTokens > 0) && (
+      {(tokenUsage || usageTotals.totalTokens > 0 || balance) && (
         <div className="flex-shrink-0 px-4 pb-3 flex flex-col gap-0.5 w-full max-w-[760px] mx-auto"
           style={{ color: 'var(--txt-3)', fontSize: 'var(--fs-xs)', fontVariantNumeric: 'tabular-nums' }}>
           {tokenUsage && (
@@ -384,6 +405,32 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, isLoading
               실제 잔액 보기
             </a>
           </span>
+          {balanceDraft !== null ? (
+            <form className="flex items-center gap-2 flex-wrap" onSubmit={(e) => { e.preventDefault(); saveBalance() }}>
+              <label htmlFor="balance-input">Console 잔액 $</label>
+              <input id="balance-input" autoFocus inputMode="decimal" value={balanceDraft} onChange={(e) => setBalanceDraft(e.target.value)}
+                placeholder="예: 20" style={{ width: 80, height: 24, padding: '0 6px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-panel)', color: 'var(--txt)' }} />
+              <button type="submit" style={{ color: 'var(--txt)', textDecoration: 'underline' }}>저장</button>
+              <button type="button" onClick={() => setBalanceDraft(null)} style={{ color: 'var(--txt-2)', textDecoration: 'underline' }}>취소</button>
+              <span>비워 두고 저장하면 표시를 끕니다</span>
+            </form>
+          ) : (
+            <span className="flex items-center gap-2 flex-wrap">
+              {remaining !== null ? (
+                <span title="입력한 Console 잔액에서 이후 예상 비용을 뺀 값입니다. 실제 청구액과 조금 다를 수 있습니다."
+                  style={{ color: remaining < 0.5 ? 'var(--err)' : remaining < 2 ? 'var(--warn)' : 'var(--txt-2)', fontWeight: 500 }}>
+                  남은 금액 약 {remaining < 0 ? `-${formatUsd(-remaining)}` : formatUsd(remaining)}
+                  {remaining < 2 && ' · 충전이 필요할 수 있어요'}
+                </span>
+              ) : (
+                <span>남은 금액을 보려면 Console 잔액을 입력하세요</span>
+              )}
+              <button onClick={() => setBalanceDraft(balance ? String(Math.max(0, +(remaining ?? 0).toFixed(2))) : '')}
+                style={{ color: 'var(--txt-2)', textDecoration: 'underline' }}>
+                {balance ? '잔액 맞추기' : '잔액 입력'}
+              </button>
+            </span>
+          )}
         </div>
       )}
     </div>

@@ -18,6 +18,8 @@ export interface Message {
   snapshot?: Record<string, string>
   // 응답 도중 오류로 끊긴 답변. 채팅에서 다시 시도 버튼을 띄운다.
   failed?: true
+  // 출력 한도(max_tokens)나 컨텍스트 한도에 걸려 잘린 답변. 'output' 이면 '이어서 생성' 버튼을 띄운다.
+  truncated?: 'output' | 'context'
   // 서버에서 생성 중인 답변의 생성 id. 응답을 다 받으면 빠진다. 남아 있는 채로 대화를 열면 이어 받는다.
   generationId?: string
 }
@@ -31,6 +33,8 @@ export interface TokenUsage {
   totalTokens: number
   // 빠른 모드로 처리됐는지(응답 usage.speed). 예상 비용 계산에 쓴다.
   fast?: boolean
+  // 응답이 끝난 이유. max_tokens·model_context_window_exceeded 면 응답이 잘린 것이다.
+  stopReason?: string
   limitPerMin: number
   remainingPerMin: number
   resetInSeconds: number
@@ -249,9 +253,12 @@ Vue mode rules:
 
 ## Refining (all modes)
 - Keep the existing design language consistent and change only what was asked
+- Output ONLY the files you create or modify, each with its complete content. Never re-output unchanged files — the app keeps them.
+- Always include <VIBE_TYPE> with the project's current type, even when outputting a single file.
+- The current project files arrive in a system message after the user's latest request.
 
 ## Design direction first (new projects only)
-When there is NO "Current files" section below and the user has not specified a visual style:
+When no current project files are provided and the user has not specified a visual style:
 - Do NOT generate code yet. Reply in plain Korean text only (no <VIBE_*> tags).
 - Propose 2–3 distinct design directions. For each: a short name, mood, color palette (hex), fonts, layout idea, and one reference feel (e.g. "노션 같은 문서형").
 - Avoid generic AI-looking choices (purple/cyan gradients, glow blobs, emoji decoration, dark-by-default).
@@ -259,6 +266,27 @@ When there is NO "Current files" section below and the user has not specified a 
 Generate code only after the user picks or adjusts a direction.
 If the user says to build immediately (e.g. "바로 만들어", "알아서"), skip this step.
 Refinements of an existing project never go through this step.`
+
+type ApiBlock =
+  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+
+/**
+ * 앱 메시지 → API 메시지.
+ * 이미지가 있는 메시지는 이미지 블록들 뒤에 텍스트를 둔다(권장 순서). 이전 턴의 이미지도 매번 다시 보내야 참조할 수 있다.
+ * 캐시 지점 ②: 마지막 user 메시지의 마지막 블록. 다음 턴에는 여기까지(시스템 프롬프트 + 이력 + 이미지)가 캐시에서 읽힌다.
+ * 화면 전용 필드(files·snapshot·thinking 등)는 보내지 않는다.
+ */
+function apiMessages(messages: Message[]): { role: 'user' | 'assistant'; content: string | ApiBlock[] }[] {
+  const lastUser = messages.map((m) => m.role).lastIndexOf('user')
+  return messages.map((m, i) => {
+    const blocks: ApiBlock[] = [
+      ...(m.images ?? []).map((img) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: img.mediaType, data: img.data } })),
+      { type: 'text' as const, text: m.content || '(내용 없음)', ...(i === lastUser ? { cache_control: { type: 'ephemeral' as const } } : {}) },
+    ]
+    return { role: m.role, content: blocks.length === 1 && i !== lastUser ? m.content || '(내용 없음)' : blocks }
+  })
+}
 
 /**
  * Claude 스트리밍 코드 생성
@@ -286,8 +314,10 @@ export async function* streamCode(
   // 생각 요약 조각. options.showThinking 일 때만 온다.
   onThinking?: (text: string) => void,
 ): AsyncGenerator<string, void, unknown> {
+  // 현재 파일은 대화 이력 '뒤'에 대화 중간 system 메시지로 붙인다. 이력보다 앞(최상위 system)에 두면
+  // 파일이 바뀔 때마다 뒤따르는 이력 전체의 캐시가 깨져, 매 턴 이력을 정가로 다시 내게 된다.
   const currentContext = currentFiles && Object.keys(currentFiles).length > 0
-    ? `\n\nThe user is refining their existing project. Current files:\n` +
+    ? `The user is refining their existing project. Current files (output only the files you change):\n\n` +
       Object.entries(currentFiles)
         .map(([name, content]) => `--- ${name} ---\n${content}`)
         .join('\n\n')
@@ -306,25 +336,12 @@ export async function* streamCode(
     ...(fast ? { speed: 'fast' } : {}),
     // 생각은 항상 켜져 있다(adaptive). 요약을 받을 때만 display 를 지정한다.
     ...(options.showThinking ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
-    // 고정 프롬프트만 캐시한다. 파일 내용은 요청마다 바뀌어 캐시해도 적중하지 않는다.
-    system: [
-      { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-      ...(currentContext ? [{ type: 'text' as const, text: currentContext }] : []),
+    // 캐시 지점 ①: 고정 시스템 프롬프트
+    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [
+      ...apiMessages(messages),
+      ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
     ],
-    // 이미지가 있는 메시지는 이미지 블록들 뒤에 텍스트를 둔다(이미지를 먼저 두는 것이 권장 순서).
-    // 이전 턴의 이미지도 매번 다시 보내야 Claude 가 그 이미지를 참조할 수 있다.
-    messages: messages.map((m) => ({
-      role: m.role,
-      content: m.images?.length
-        ? [
-            ...m.images.map((img) => ({
-              type: 'image' as const,
-              source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
-            })),
-            { type: 'text' as const, text: m.content },
-          ]
-        : m.content,
-    })),
     ...(useFallback ? { fallbacks: 'default' } : {}),
   })
   const headers: Record<string, string> = {
@@ -521,6 +538,7 @@ function reportUsage(usage: Record<string, number>, stopReason: string | undefin
     completionTokens,
     totalTokens: promptTokens + completionTokens,
     fast,
+    stopReason,
     // Anthropic rate limit 헤더는 서버가 전달하지 않으므로 -1(표시 안 함)로 둔다.
     limitPerMin: -1,
     remainingPerMin: -1,
