@@ -1,5 +1,6 @@
 import type { Message } from './ai'
-import { findFile, listFiles, readFile, removeFile, writeFile } from './drive'
+import { findFile, isDriveConnected, listFiles, readFile, removeFile, writeFile } from './drive'
+import { localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
  * 대화 저장소
@@ -43,6 +44,9 @@ async function request(apiKey: string, path: string, init: RequestInit = {}): Pr
 /** 대화를 Google 드라이브에 저장하는지(서버 주소가 없을 때) */
 export const USE_DRIVE = !SERVER_URL
 
+/** 드라이브 방식인데 아직 연결 전이면 이 브라우저(IndexedDB)에 저장한다. */
+export const usingLocal = () => USE_DRIVE && !isDriveConnected()
+
 // 대화 id → 드라이브 파일 id. 목록을 받을 때 채운다.
 const driveIds = new Map<string, string>()
 const PREFIX = 'chat-'
@@ -68,6 +72,11 @@ async function driveId(id: string): Promise<string | undefined> {
 
 /** 최근 수정 순 목록. 서버가 정렬해 준다. */
 export async function listChats(apiKey: string): Promise<ChatSummary[]> {
+  if (usingLocal()) {
+    return (await localGetAll<StoredChat>())
+      .map(({ id, title, updatedAt }) => ({ id, title, updatedAt }))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
   if (USE_DRIVE) {
     const files = await listFiles(PREFIX)
     driveIds.clear()
@@ -83,6 +92,7 @@ export async function listChats(apiKey: string): Promise<ChatSummary[]> {
 }
 
 export async function loadChat(apiKey: string, id: string): Promise<StoredChat | undefined> {
+  if (usingLocal()) return localGet<StoredChat>(id)
   if (USE_DRIVE) {
     const fid = await driveId(id)
     const text = fid ? await readFile(fid) : undefined
@@ -93,6 +103,7 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
 }
 
 export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> {
+  if (usingLocal()) return localPut(chat)
   if (USE_DRIVE) {
     // appProperties 는 키+값 124바이트 한도라 제목을 짧게 자른다.
     const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt) }
@@ -109,6 +120,7 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> 
 }
 
 export async function deleteChat(apiKey: string, id: string): Promise<void> {
+  if (usingLocal()) return localDelete(id)
   if (USE_DRIVE) {
     const fid = await driveId(id)
     if (fid) await removeFile(fid)

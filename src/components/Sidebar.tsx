@@ -85,16 +85,19 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
         <div className="flex-shrink-0" style={{ padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--fs-xs)', color: 'var(--txt-2)' }}>
           <GoogleDrive aria-hidden="true" style={{ width: 16, height: 16, flexShrink: 0 }} />
           {!drive.configured ? (
-            <span>VITE_GOOGLE_CLIENT_ID 가 없어 대화를 저장하지 않습니다</span>
+            <span>이 브라우저에 저장 중 (드라이브 연결은 GOOGLE_CLIENT_ID 설정 후 가능)</span>
           ) : drive.connected ? (
             <>
               <span className="flex-1">Google 드라이브에 저장 중</span>
               <button onClick={drive.onDisconnect} disabled={drive.busy} style={{ color: 'var(--txt-3)', textDecoration: 'underline' }}>연결 해제</button>
             </>
           ) : (
-            <button onClick={drive.onConnect} disabled={drive.busy} className="sidebar-new" style={{ flex: 1 }}>
-              {drive.busy ? '연결 중…' : 'Google 드라이브 연결'}
-            </button>
+            <div className="flex-1" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span>이 브라우저에 저장 중</span>
+              <button onClick={drive.onConnect} disabled={drive.busy} className="sidebar-new">
+                {drive.busy ? '연결 중…' : 'Google 드라이브 연결'}
+              </button>
+            </div>
           )}
         </div>
       )}

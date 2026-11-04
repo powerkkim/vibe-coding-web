@@ -1,6 +1,6 @@
 # Vibe Coding Web
 
-> v2 · 2026-11-04 · powerkkim 구성 (원본: guraking/vibe-coding-web)
+> v3 · 2026-11-04 · powerkkim 구성 (원본: guraking/vibe-coding-web)
 > 배포 주소: https://powerkkim.github.io/vibe-coding-web/
 
 AI 기반 프론트엔드 코드 생성 웹 애플리케이션입니다. 자연어로 설명하면 HTML / React / Vue 프로젝트를 즉시 생성하고 실시간으로 미리볼 수 있습니다.
@@ -72,7 +72,7 @@ npm run build
 | 기능 | Worker 방식(원본) | 이 구성 |
 |------|------|------|
 | 코드 생성 | Worker → Anthropic | 브라우저 → Anthropic 직접 호출 (`anthropic-dangerous-direct-browser-access`) |
-| 대화 저장 | R2 (API 키별) | Google 드라이브 appDataFolder (Google 계정별, 숨김 폴더) |
+| 대화 저장 | R2 (API 키별) | 드라이브 연결 전: 이 브라우저(IndexedDB) / 연결 후: Google 드라이브 appDataFolder |
 | 브라우저 닫힌 뒤 이어 받기 | 지원 | 미지원 (다시 시도 버튼) |
 
 API 키는 설정 모달에 입력하면 **내 브라우저 localStorage 에만** 저장됩니다. 빌드 결과물·저장소에는 들어가지 않습니다.

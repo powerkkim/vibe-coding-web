@@ -214,7 +214,8 @@ export default function App() {
   const [driveConnected, setDriveConnected] = useState(() => isDriveConnected())
   const [driveBusy, setDriveBusy] = useState(false)
   useEffect(() => onDriveChange(setDriveConnected), [])
-  const storageReady = USE_DRIVE ? driveConnected : !!activeApiKey
+  // 드라이브 방식은 연결 전에도 브라우저(IndexedDB)에 저장하므로 항상 쓸 수 있다.
+  const storageReady = USE_DRIVE ? true : !!activeApiKey
   const storageFailMessage = (fallback: string) => (e: unknown) =>
     setStorageError(e instanceof DriveAuthError ? 'Google 드라이브를 연결하면 대화가 저장됩니다' : fallback)
   const handleConnectDrive = async () => {
@@ -230,14 +231,15 @@ export default function App() {
   }
   const handleDisconnectDrive = () => {
     disconnectDrive()
-    setChats([])
     chatCacheRef.current.clear()
   }
+  // 저장 위치(브라우저 ↔ 드라이브)가 바뀌면 보관본을 비우고 목록을 다시 받는다(아래 목록 effect).
+  useEffect(() => { chatCacheRef.current.clear() }, [driveConnected])
 
   useEffect(() => {
     if (!storageReady) return
     listChats(activeApiKey).then(setChats).catch(storageFailMessage('대화 목록을 불러오지 못했습니다'))
-  }, [activeApiKey, storageReady])
+  }, [activeApiKey, storageReady, driveConnected])
 
   // 새로고침해도 마지막에 열어 둔 대화를 다시 연다. 저장소를 쓸 수 있게 된 첫 시점에 한 번만 연다.
   // 아래 기억 effect 가 키를 지우기 전에 읽어 둔다.
