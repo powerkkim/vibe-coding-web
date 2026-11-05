@@ -13,7 +13,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, USE_DRIVE } from './services/chatStore'
+import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
@@ -291,6 +291,16 @@ export default function App() {
     setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
     setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
   }
+
+  // 저장 대기(0.5초) 중에 탭을 닫으면 그 내용을 브라우저에 대기 저장해 둔다.
+  useEffect(() => {
+    const onHide = () => {
+      if (!chatId || messages.length === 0 || !unsavedRef.current) return
+      savePendingNow({ id: chatId, title: chatTitle(messages), createdAt: chatCreatedAtRef.current, updatedAt: Date.now(), messages, projectFiles, projectType, githubRepo })
+    }
+    window.addEventListener('pagehide', onHide)
+    return () => window.removeEventListener('pagehide', onHide)
+  }, [chatId, messages, projectFiles, projectType, githubRepo])
 
   // 응답이 끝났거나 코드 탭에서 파일을 고친 뒤 SAVE_DELAY_MS 동안 변화가 없으면 저장한다. 생성 중에는 저장하지 않는다(시작 시 저장은 handleSend 가 한다).
   useEffect(() => {

@@ -95,37 +95,105 @@ function loadGis(): Promise<void> {
   return gisLoading
 }
 
-/**
- * 토큰을 받는다. 사용자 클릭 안에서 호출해야 팝업이 막히지 않는다.
- * GIS 토큰은 1시간짜리이고 갱신 토큰이 없어서, 만료되면 이 함수를 다시 불러야 한다.
- * 연결했던 계정이 있으면 그 계정을 login_hint 로 주고 prompt 를 비워, 동의·계정 선택 없이 팝업이 잠깐 떴다 닫힌다.
- * (예전엔 만료 후 매번 계정 선택이 떠서 다른 계정을 고르면 그 계정 드라이브라 목록이 비어 보였다.)
- */
-export async function connectDrive(): Promise<void> {
-  if (!GOOGLE_CLIENT_ID) throw new Error('VITE_GOOGLE_CLIENT_ID 가 설정되지 않았습니다')
-  await loadGis()
-  await new Promise<void>((resolve, reject) => {
-    const client = window.google!.accounts.oauth2.initTokenClient({
+// ── 토큰 받기 ───────────────────────────────────────────────
+// 토큰 클라이언트는 한 번 만들어 두고 재사용한다. 팝업은 사용자 동작(클릭·키 입력) '안에서 동기적으로' 열어야
+// 브라우저가 막지 않으므로, 스크립트 로드·클라이언트 생성을 미리 끝내 두는 것이 '살며시 재로그인'의 핵심이다.
+let client: TokenClient | null = null
+let clientHint: string | undefined
+let waiting: { resolve: () => void; reject: (e: Error) => void } | null = null
+let renewing: Promise<void> | null = null
+
+function onToken(r: TokenResponse) {
+  const w = waiting
+  waiting = null
+  if (!r.access_token) return w?.reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
+  const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000 }
+  // 어느 계정에 붙었는지 확인해 기억한다(목록 표시·다음 재연결의 login_hint). 실패해도 연결은 유지한다.
+  fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((b: { user?: { emailAddress?: string; displayName?: string } } | null) => {
+      if (b?.user?.emailAddress) setAccount({ email: b.user.emailAddress, name: b.user.displayName })
+    })
+    .catch(() => {})
+    .finally(() => { setSaved(token); w?.resolve() })
+}
+
+function ensureClient(): TokenClient | null {
+  if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) return null
+  if (!client || clientHint !== account?.email) {
+    clientHint = account?.email
+    client = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: SCOPE,
       ...(account ? { login_hint: account.email } : {}),
-      callback: (r: TokenResponse) => {
-        if (!r.access_token) return reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
-        const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000 }
-        // 어느 계정에 붙었는지 확인해 기억한다(목록 표시용). 실패해도 연결은 유지한다.
-        fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
-          .then((res) => (res.ok ? res.json() : null))
-          .then((b: { user?: { emailAddress?: string; displayName?: string } } | null) => {
-            if (b?.user?.emailAddress) setAccount({ email: b.user.emailAddress, name: b.user.displayName })
-          })
-          .catch(() => {})
-          .finally(() => { setSaved(token); resolve() })
+      callback: onToken,
+      error_callback: (e: { type: string; message?: string }) => {
+        const w = waiting
+        waiting = null
+        w?.reject(new Error(e.type === 'popup_closed' ? '로그인 창이 닫혔습니다' : e.type === 'popup_failed_to_open' ? '팝업이 차단됐습니다' : e.message || e.type))
       },
-      error_callback: (e: { type: string; message?: string }) => reject(new Error(e.type === 'popup_closed' ? '로그인 창이 닫혔습니다' : e.message || e.type)),
     })
-    client.requestAccessToken({ prompt: account ? '' : 'select_account' })
-  })
+  }
+  return client
 }
+
+/** 팝업을 연다. 반드시 사용자 동작 처리 중에 동기적으로 불러야 한다. 이미 진행 중이면 그 결과를 함께 기다린다. */
+function requestToken(c: TokenClient, prompt: string): Promise<void> {
+  if (renewing) return renewing
+  renewing = new Promise<void>((resolve, reject) => {
+    waiting = { resolve, reject }
+    c.requestAccessToken({ prompt })
+  }).finally(() => { renewing = null })
+  return renewing
+}
+
+/** 진행 중인 재로그인이 있으면 끝날 때까지 기다린다(성공·실패 무관). 만료 중 대화를 열 때 쓴다. */
+export async function waitForRenewal(): Promise<void> {
+  if (renewing) await renewing.catch(() => {})
+}
+
+/**
+ * '드라이브 연결' / '다시 연결' 버튼.
+ * GIS 토큰은 1시간짜리이고 갱신 토큰이 없다. 연결했던 계정이 있으면 login_hint + prompt '' 로
+ * 동의·계정 선택 없이 팝업이 잠깐 떴다 닫힌다. 처음 연결이면 계정 선택을 띄운다.
+ */
+export async function connectDrive(): Promise<void> {
+  if (!GOOGLE_CLIENT_ID) throw new Error('VITE_GOOGLE_CLIENT_ID 가 설정되지 않았습니다')
+  if (renewing) return renewing
+  // 스크립트가 아직 없으면 불러온 뒤 연다(첫 연결). 이때는 팝업이 막힐 수 있어 미리 로드해 둔다(아래 자동 갱신).
+  const c = ensureClient() ?? (await loadGis(), ensureClient())
+  if (!c) throw new Error('Google 로그인 스크립트를 불러오지 못했습니다')
+  return requestToken(c, account ? '' : 'select_account')
+}
+
+// ── 살며시 재로그인 ──────────────────────────────────────────
+// 연결했던 계정이 있으면, 토큰이 10분 안에 만료되거나 이미 만료된 상태에서 사용자가 화면을 클릭·키 입력할 때
+// 그 동작에 맞춰 조용히 토큰을 다시 받는다(브라우저에 Google 로그인이 살아 있으면 팝업이 잠깐 떴다 닫힘).
+// 실패하면(로그인 만료·팝업 차단) 잠시 쉬었다가 다시 시도하고, 그동안은 '다시 연결' 버튼과 대기 저장으로 버틴다.
+const RENEW_BEFORE_MS = 10 * 60_000
+const RETRY_AFTER_MS = 2 * 60_000
+let lastAttempt = 0
+
+function maybeRenew() {
+  if (!account || renewing || Date.now() - lastAttempt < RETRY_AFTER_MS) return
+  const remaining = saved ? saved.expiresAt - Date.now() : -1
+  if (remaining > RENEW_BEFORE_MS) return
+  const c = ensureClient()
+  if (!c) return
+  lastAttempt = Date.now()
+  requestToken(c, '').catch(() => {})
+}
+
+function installAutoRenew() {
+  if (typeof window === 'undefined' || !GOOGLE_CLIENT_ID) return
+  // 로그인 팝업을 클릭 안에서 바로 열 수 있게 스크립트를 미리 받아 둔다(늦게 받으면 팝업이 차단될 수 있다).
+  loadGis().then(() => ensureClient()).catch(() => {})
+  // 사용자 활성화로 인정되는 이벤트: 마우스는 pointerdown, 터치는 pointerup, 그리고 키 입력.
+  document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') maybeRenew() }, true)
+  document.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') maybeRenew() }, true)
+  document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') maybeRenew() }, true)
+}
+installAutoRenew()
 
 export function disconnectDrive() {
   const t = saved?.token

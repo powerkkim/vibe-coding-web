@@ -1,5 +1,5 @@
 import type { Message } from './ai'
-import { DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, writeFile } from './drive'
+import { DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
 import { localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
@@ -153,6 +153,8 @@ export async function listChats(apiKey: string): Promise<ChatListItem[]> {
 
 export async function loadChat(apiKey: string, id: string): Promise<StoredChat | undefined> {
   if (USE_DRIVE) {
+    // 클릭과 동시에 살며시 재로그인이 시작됐을 수 있다. 끝나길 기다렸다가 연결 상태로 연다.
+    await waitForRenewal()
     const local = await localGet<StoredChat>(id)
     if (local || usingLocal()) {
       // 드라이브에만 있는 대화를 만료 중에 열려고 하면 다시 연결하라고 알린다.
@@ -174,6 +176,7 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
  */
 export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive' | 'local' | 'server'> {
   if (USE_DRIVE) {
+    await waitForRenewal()
     if (usingLocal()) { await localPut(chat); return 'local' }
     try {
       await driveSave(chat)
@@ -193,8 +196,14 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive
   return 'server'
 }
 
+/** 탭을 닫는 순간 저장되지 않은 대화를 브라우저에 대기 저장한다(드라이브 요청은 닫히면서 끊길 수 있어서). 다음 실행 때 드라이브로 올라간다. */
+export function savePendingNow(chat: StoredChat) {
+  if (USE_DRIVE) localPut(chat).catch(() => {})
+}
+
 export async function deleteChat(apiKey: string, id: string): Promise<void> {
   if (USE_DRIVE) {
+    await waitForRenewal()
     await localDelete(id)
     if (usingLocal()) {
       if (readListCache().some((c) => c.id === id)) throw new DriveAuthError()

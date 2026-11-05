@@ -100,7 +100,7 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
           ) : drive.expired ? (
             <div className="flex-1 min-w-0" role="status" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ color: 'var(--warn)' }}>드라이브 연결이 만료됐어요 (1시간마다 만료)</span>
-              <span style={{ color: 'var(--txt-3)' }}>지금은 이 브라우저에 임시 저장하고, 다시 연결하면 드라이브로 올립니다.</span>
+              <span style={{ color: 'var(--txt-3)' }}>화면을 클릭하면 자동으로 다시 연결해요. 그동안 대화는 이 브라우저에 임시 저장했다가 연결되면 드라이브로 올립니다.</span>
               <button onClick={drive.onConnect} disabled={drive.busy} className="sidebar-new">
                 {drive.busy ? '연결 중…' : `다시 연결${drive.account ? ` (${drive.account})` : ''}`}
               </button>
