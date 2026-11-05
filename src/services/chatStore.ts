@@ -167,10 +167,22 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
   return res.status === 404 ? undefined : res.json()
 }
 
-export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> {
+/**
+ * 저장 위치를 돌려준다. 'local' 이면 브라우저에 대기 저장된 것(다시 연결·새로고침 때 드라이브로 올라감).
+ * 드라이브 저장이 실패하면(턴 도중 토큰 만료로 401, 네트워크 오류 등) 버리지 않고 브라우저에 대기 저장한다.
+ * 예전엔 이 경우 저장이 실패한 채 다시 시도하지 않아, 그 턴 내용이 어디에도 남지 않을 수 있었다.
+ */
+export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive' | 'local' | 'server'> {
   if (USE_DRIVE) {
-    if (usingLocal()) return localPut(chat)
-    return driveSave(chat)
+    if (usingLocal()) { await localPut(chat); return 'local' }
+    try {
+      await driveSave(chat)
+      await localDelete(chat.id)   // 예전 대기본이 있으면 정리
+      return 'drive'
+    } catch {
+      await localPut(chat)
+      return 'local'
+    }
   }
   await request(apiKey, `/chats/${encodeURIComponent(chat.id)}`, {
     method: 'PUT',
@@ -178,6 +190,7 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> 
     headers: { 'Content-Type': 'application/json', 'X-Chat-Title': encodeURIComponent(chat.title), 'X-Chat-Updated-At': String(chat.updatedAt) },
     body: JSON.stringify(chat),
   })
+  return 'server'
 }
 
 export async function deleteChat(apiKey: string, id: string): Promise<void> {

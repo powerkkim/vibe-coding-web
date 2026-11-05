@@ -13,7 +13,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, USE_DRIVE, usingLocal } from './services/chatStore'
+import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, USE_DRIVE } from './services/chatStore'
 import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
@@ -286,9 +286,10 @@ export default function App() {
       githubRepo,
     }
     chatCacheRef.current.set(chat.id, chat)
-    await saveChat(activeApiKey, chat)
-    setStorageError('')
-    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(usingLocal() ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+    const where = await saveChat(activeApiKey, chat)
+    // 연결된 상태인데 브라우저에 저장됐다 = 드라이브 저장이 실패해 대기 저장으로 돌린 것
+    setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
+    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
   }
 
   // 응답이 끝났거나 코드 탭에서 파일을 고친 뒤 SAVE_DELAY_MS 동안 변화가 없으면 저장한다. 생성 중에는 저장하지 않는다(시작 시 저장은 handleSend 가 한다).
