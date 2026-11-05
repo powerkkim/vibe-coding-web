@@ -13,6 +13,9 @@ export const GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string
 
 const SCOPE = 'https://www.googleapis.com/auth/drive.appdata'
 const TOKEN_KEY = 'vibe_gdrive_token'
+// 연결했던 Google 계정. 토큰이 만료돼도 남겨 두고, 다시 연결할 때 같은 계정으로 계정 선택 없이 바로 붙인다.
+// '연결 해제'를 눌렀을 때만 지운다.
+const ACCOUNT_KEY = 'vibe_gdrive_account'
 const API = 'https://www.googleapis.com/drive/v3'
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3'
 
@@ -28,8 +31,31 @@ declare global {
 }
 
 type Saved = { token: string; expiresAt: number }
+export type DriveAccount = { email: string; name?: string }
 let saved: Saved | null = readSaved()
+let account: DriveAccount | null = readAccount()
 const listeners = new Set<(connected: boolean) => void>()
+let expiryTimer: ReturnType<typeof setTimeout> | undefined
+scheduleExpiry()
+
+function readAccount(): DriveAccount | null {
+  try { return JSON.parse(localStorage.getItem(ACCOUNT_KEY) ?? 'null') } catch { return null }
+}
+function setAccount(a: DriveAccount | null) {
+  account = a
+  try {
+    if (a) localStorage.setItem(ACCOUNT_KEY, JSON.stringify(a))
+    else localStorage.removeItem(ACCOUNT_KEY)
+  } catch { /* 무시 */ }
+}
+
+/** 토큰이 만료되는 순간 화면에 알린다(만료돼도 아무 이벤트가 없어, 예전엔 조용히 브라우저 저장으로 바뀌었다). */
+function scheduleExpiry() {
+  clearTimeout(expiryTimer)
+  if (!saved) return
+  const ms = saved.expiresAt - 60_000 - Date.now()
+  expiryTimer = setTimeout(() => listeners.forEach((fn) => fn(isDriveConnected())), Math.max(0, Math.min(ms, 2 ** 31 - 1)))
+}
 
 function readSaved(): Saved | null {
   try {
@@ -44,11 +70,15 @@ function setSaved(v: Saved | null) {
     if (v) localStorage.setItem(TOKEN_KEY, JSON.stringify(v))
     else localStorage.removeItem(TOKEN_KEY)
   } catch { /* 저장 불가 브라우저는 메모리에만 둔다 */ }
+  scheduleExpiry()
   listeners.forEach((fn) => fn(isDriveConnected()))
 }
 
 export function isDriveConfigured() { return !!GOOGLE_CLIENT_ID }
 export function isDriveConnected() { return !!saved && saved.expiresAt > Date.now() + 60_000 }
+/** 연결했던 적이 있는데 토큰이 만료된 상태. 화면에 '다시 연결'을 띄운다. */
+export function isDriveExpired() { return !!account && !isDriveConnected() }
+export function driveAccount() { return account }
 export function onDriveChange(fn: (connected: boolean) => void) { listeners.add(fn); return () => { listeners.delete(fn) } }
 
 let gisLoading: Promise<void> | null = null
@@ -67,7 +97,9 @@ function loadGis(): Promise<void> {
 
 /**
  * 토큰을 받는다. 사용자 클릭 안에서 호출해야 팝업이 막히지 않는다.
- * 처음엔 동의 화면이, 이후엔(같은 계정) 짧은 팝업만 뜨고 바로 닫힌다.
+ * GIS 토큰은 1시간짜리이고 갱신 토큰이 없어서, 만료되면 이 함수를 다시 불러야 한다.
+ * 연결했던 계정이 있으면 그 계정을 login_hint 로 주고 prompt 를 비워, 동의·계정 선택 없이 팝업이 잠깐 떴다 닫힌다.
+ * (예전엔 만료 후 매번 계정 선택이 떠서 다른 계정을 고르면 그 계정 드라이브라 목록이 비어 보였다.)
  */
 export async function connectDrive(): Promise<void> {
   if (!GOOGLE_CLIENT_ID) throw new Error('VITE_GOOGLE_CLIENT_ID 가 설정되지 않았습니다')
@@ -76,19 +108,28 @@ export async function connectDrive(): Promise<void> {
     const client = window.google!.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
       scope: SCOPE,
+      ...(account ? { login_hint: account.email } : {}),
       callback: (r: TokenResponse) => {
         if (!r.access_token) return reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
-        setSaved({ token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000 })
-        resolve()
+        const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000 }
+        // 어느 계정에 붙었는지 확인해 기억한다(목록 표시용). 실패해도 연결은 유지한다.
+        fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((b: { user?: { emailAddress?: string; displayName?: string } } | null) => {
+            if (b?.user?.emailAddress) setAccount({ email: b.user.emailAddress, name: b.user.displayName })
+          })
+          .catch(() => {})
+          .finally(() => { setSaved(token); resolve() })
       },
       error_callback: (e: { type: string; message?: string }) => reject(new Error(e.type === 'popup_closed' ? '로그인 창이 닫혔습니다' : e.message || e.type)),
     })
-    client.requestAccessToken({ prompt: saved ? '' : undefined })
+    client.requestAccessToken({ prompt: account ? '' : 'select_account' })
   })
 }
 
 export function disconnectDrive() {
   const t = saved?.token
+  setAccount(null)
   setSaved(null)
   if (t) window.google?.accounts.oauth2.revoke(t)
 }
@@ -101,24 +142,24 @@ async function driveFetch(url: string, init: RequestInit = {}): Promise<Response
   return res
 }
 
-export interface DriveFileMeta { id: string; name: string; appProperties?: Record<string, string> }
+export interface DriveFileMeta { id: string; name: string; appProperties?: Record<string, string>; modifiedTime?: string }
 
-/** appDataFolder 안에서 이름이 prefix 로 시작하는 파일 전부 */
+/**
+ * appDataFolder 안에서 이름이 prefix 로 시작하는 파일 전부.
+ * 검색어(q=name contains …)를 쓰지 않고 폴더 전체를 받아 걸러낸다. 이 폴더엔 이 앱 파일만 있어 양이 적고,
+ * Drive 검색 색인은 방금 만든 파일을 바로 못 찾거나 '-' 같은 문자를 다르게 나눌 수 있어서다.
+ * (예전 방식은 색인에 안 잡힌 파일이 목록에서 빠지고, 같은 대화를 저장할 때마다 새 파일이 생길 수 있었다.)
+ */
 export async function listFiles(prefix: string): Promise<DriveFileMeta[]> {
   const out: DriveFileMeta[] = []
   let pageToken = ''
   do {
-    const q = encodeURIComponent(`name contains '${prefix}' and trashed = false`)
-    const res = await driveFetch(`${API}/files?spaces=appDataFolder&q=${q}&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)${pageToken ? `&pageToken=${pageToken}` : ''}`)
+    const res = await driveFetch(`${API}/files?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name,appProperties,modifiedTime)${pageToken ? `&pageToken=${pageToken}` : ''}`)
     const body = await res.json() as { files: DriveFileMeta[]; nextPageToken?: string }
     out.push(...body.files.filter((f) => f.name.startsWith(prefix)))
     pageToken = body.nextPageToken ?? ''
   } while (pageToken)
   return out
-}
-
-export async function findFile(name: string): Promise<DriveFileMeta | undefined> {
-  return (await listFiles(name)).find((f) => f.name === name)
 }
 
 export async function readFile(fileId: string): Promise<string | undefined> {

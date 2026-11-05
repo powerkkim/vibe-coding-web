@@ -1,5 +1,5 @@
 import { Plus, Trash2, MessageSquare, PanelLeft, Loader2, GoogleDrive } from '../icons'
-import type { ChatSummary } from '../services/chatStore'
+import type { ChatListItem as ChatSummary } from '../services/chatStore'
 
 /**
  * Sidebar: 저장된 대화 목록
@@ -19,7 +19,7 @@ interface Props {
   onDelete: (id: string) => void
   onClose: () => void
   // 대화를 Google 드라이브에 저장할 때만 넘긴다.
-  drive?: { configured: boolean; connected: boolean; busy: boolean; onConnect: () => void; onDisconnect: () => void }
+  drive?: { configured: boolean; connected: boolean; expired: boolean; account?: string; busy: boolean; onConnect: () => void; onDisconnect: () => void }
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -69,7 +69,10 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
                     {chat.id === loadingId
                       ? <Loader2 aria-label="불러오는 중" className="motion-safe:animate-spin" style={{ width: 14, height: 14, flexShrink: 0 }} />
                       : <MessageSquare aria-hidden="true" style={{ width: 14, height: 14, flexShrink: 0 }} />}
-                    <span className="truncate">{chat.title}</span>
+                    <span className="truncate" style={chat.driveOnly ? { opacity: 0.55 } : undefined}>{chat.title}</span>
+                    {chat.pending && drive?.connected === false && drive.expired && (
+                      <span title="드라이브를 다시 연결하면 자동으로 올라갑니다" style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 10, color: 'var(--warn)' }}>대기</span>
+                    )}
                   </button>
                   <button onClick={() => onDelete(chat.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${chat.title} 삭제`}>
                     <Trash2 style={{ width: 14, height: 14 }} />
@@ -88,9 +91,20 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
             <span>이 브라우저에 저장 중 (드라이브 연결은 GOOGLE_CLIENT_ID 설정 후 가능)</span>
           ) : drive.connected ? (
             <>
-              <span className="flex-1">Google 드라이브에 저장 중</span>
-              <button onClick={drive.onDisconnect} disabled={drive.busy} style={{ color: 'var(--txt-3)', textDecoration: 'underline' }}>연결 해제</button>
+              <span className="flex-1 min-w-0" style={{ display: 'flex', flexDirection: 'column' }}>
+                <span>Google 드라이브에 저장 중</span>
+                {drive.account && <span className="truncate" style={{ color: 'var(--txt-3)' }} title={drive.account}>{drive.account}</span>}
+              </span>
+              <button onClick={drive.onDisconnect} disabled={drive.busy} style={{ color: 'var(--txt-3)', textDecoration: 'underline', flexShrink: 0 }}>연결 해제</button>
             </>
+          ) : drive.expired ? (
+            <div className="flex-1 min-w-0" role="status" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ color: 'var(--warn)' }}>드라이브 연결이 만료됐어요 (1시간마다 만료)</span>
+              <span style={{ color: 'var(--txt-3)' }}>지금은 이 브라우저에 임시 저장하고, 다시 연결하면 드라이브로 올립니다.</span>
+              <button onClick={drive.onConnect} disabled={drive.busy} className="sidebar-new">
+                {drive.busy ? '연결 중…' : `다시 연결${drive.account ? ` (${drive.account})` : ''}`}
+              </button>
+            </div>
           ) : (
             <div className="flex-1" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span>이 브라우저에 저장 중</span>

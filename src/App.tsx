@@ -13,10 +13,10 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { chatTitle, deleteChat, listChats, loadChat, saveChat, USE_DRIVE } from './services/chatStore'
-import { connectDrive, disconnectDrive, DriveAuthError, isDriveConfigured, isDriveConnected, onDriveChange } from './services/drive'
+import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, USE_DRIVE, usingLocal } from './services/chatStore'
+import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
-import type { ChatSummary, StoredChat } from './services/chatStore'
+import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
 import Header from './components/Header'  // 상단 헤더 (로고, 설정, API 키)
 import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
@@ -232,7 +232,7 @@ export default function App() {
   // 드라이브 방식은 연결 전에도 브라우저(IndexedDB)에 저장하므로 항상 쓸 수 있다.
   const storageReady = USE_DRIVE ? true : !!activeApiKey
   const storageFailMessage = (fallback: string) => (e: unknown) =>
-    setStorageError(e instanceof DriveAuthError ? 'Google 드라이브를 연결하면 대화가 저장됩니다' : fallback)
+    setStorageError(e instanceof DriveAuthError ? '드라이브 연결이 만료됐어요. 왼쪽 아래 \'다시 연결\'을 누르면 열 수 있어요' : fallback)
   const handleConnectDrive = async () => {
     setDriveBusy(true)
     try {
@@ -246,6 +246,7 @@ export default function App() {
   }
   const handleDisconnectDrive = () => {
     disconnectDrive()
+    clearDriveListCache()
     chatCacheRef.current.clear()
   }
   // 저장 위치(브라우저 ↔ 드라이브)가 바뀌면 보관본을 비우고 목록을 다시 받는다(아래 목록 effect).
@@ -287,7 +288,7 @@ export default function App() {
     chatCacheRef.current.set(chat.id, chat)
     await saveChat(activeApiKey, chat)
     setStorageError('')
-    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt }, ...prev.filter((c) => c.id !== chat.id)])
+    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(usingLocal() ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
   }
 
   // 응답이 끝났거나 코드 탭에서 파일을 고친 뒤 SAVE_DELAY_MS 동안 변화가 없으면 저장한다. 생성 중에는 저장하지 않는다(시작 시 저장은 handleSend 가 한다).
@@ -761,8 +762,8 @@ export default function App() {
       if (last?.role === 'assistant' && last.generationId) {
         runGeneration(chat.messages.slice(0, -1), last.generationId, { files: chat.projectFiles, type: chat.projectType }, true)
       }
-    } catch {
-      setStorageError('대화를 불러오지 못했습니다')
+    } catch (e) {
+      storageFailMessage('대화를 불러오지 못했습니다')(e)
     } finally {
       setLoadingChatId(null)
     }
@@ -826,7 +827,7 @@ export default function App() {
       onNew={handleNewChat}
       onDelete={handleDeleteChat}
       onClose={toggleSidebar}
-      drive={USE_DRIVE ? { configured: isDriveConfigured(), connected: driveConnected, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
+      drive={USE_DRIVE ? { configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
     />
   )
 

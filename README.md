@@ -1,6 +1,6 @@
 # Vibe Coding Web
 
-> v7 · 2026-11-05 · powerkkim 구성 (원본: guraking/vibe-coding-web)
+> v8 · 2026-11-05 · powerkkim 구성 (원본: guraking/vibe-coding-web)
 > 배포 주소: https://powerkkim.github.io/vibe-coding-web/
 
 AI 기반 프론트엔드 코드 생성 웹 애플리케이션입니다. 자연어로 설명하면 HTML / React / Vue 프로젝트를 즉시 생성하고 실시간으로 미리볼 수 있습니다.

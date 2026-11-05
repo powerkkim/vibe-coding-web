@@ -1,5 +1,5 @@
 import type { Message } from './ai'
-import { findFile, isDriveConnected, listFiles, readFile, removeFile, writeFile } from './drive'
+import { DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, writeFile } from './drive'
 import { localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
@@ -44,13 +44,37 @@ async function request(apiKey: string, path: string, init: RequestInit = {}): Pr
 /** 대화를 Google 드라이브에 저장하는지(서버 주소가 없을 때) */
 export const USE_DRIVE = !SERVER_URL
 
-/** 드라이브 방식인데 아직 연결 전이면 이 브라우저(IndexedDB)에 저장한다. */
+/**
+ * 드라이브 방식의 저장 규칙
+ * - 연결됨: 드라이브에 저장한다.
+ * - 연결 전·토큰 만료: 이 브라우저(IndexedDB)에 '대기'로 저장한다.
+ * - 다시 연결되면 대기 중인 대화를 드라이브로 올리고(더 최신일 때만) 브라우저에서 지운다.
+ * - 목록은 드라이브 + 대기 중 대화를 합쳐 보여준다. 만료 중에는 마지막으로 받은 드라이브 목록(캐시)을 함께 보여준다.
+ */
 export const usingLocal = () => USE_DRIVE && !isDriveConnected()
+
+/** 목록 항목. pending: 아직 드라이브에 올라가지 않음, driveOnly: 드라이브에만 있어 열려면 연결이 필요함 */
+export type ChatListItem = ChatSummary & { pending?: boolean; driveOnly?: boolean }
 
 // 대화 id → 드라이브 파일 id. 목록을 받을 때 채운다.
 const driveIds = new Map<string, string>()
 const PREFIX = 'chat-'
 const fileName = (id: string) => `${PREFIX}${id}.json`
+const LIST_CACHE_KEY = 'vibe_gdrive_list_cache'
+
+function readListCache(): ChatSummary[] {
+  try { return JSON.parse(localStorage.getItem(LIST_CACHE_KEY) ?? '[]') } catch { return [] }
+}
+function writeListCache(list: ChatSummary[]) {
+  try { localStorage.setItem(LIST_CACHE_KEY, JSON.stringify(list.slice(0, 500))) } catch { /* 무시 */ }
+}
+/** 연결 해제 시 마지막 드라이브 목록을 지운다(다른 계정으로 바꿀 수 있으므로). */
+export function clearDriveListCache() {
+  try { localStorage.removeItem(LIST_CACHE_KEY) } catch { /* 무시 */ }
+}
+function updateListCache(fn: (list: ChatSummary[]) => ChatSummary[]) {
+  writeListCache(fn(readListCache()))
+}
 
 function fitBytes(text: string, max: number): string {
   const enc = new TextEncoder()
@@ -62,38 +86,79 @@ function fitBytes(text: string, max: number): string {
   return out
 }
 
-async function driveId(id: string): Promise<string | undefined> {
-  if (!driveIds.has(id)) {
-    const f = await findFile(fileName(id))
-    if (f) driveIds.set(id, f.id)
+const byRecent = (a: ChatSummary, b: ChatSummary) => b.updatedAt - a.updatedAt
+
+/** 드라이브 파일 목록 → 대화 요약. 같은 대화 파일이 여러 개면(예전 버전에서 생긴 중복) 가장 최신 것을 쓴다. */
+async function driveList(): Promise<ChatSummary[]> {
+  const files = await listFiles(PREFIX)
+  const best = new Map<string, ChatSummary>()
+  driveIds.clear()
+  for (const f of files) {
+    if (!f.name.endsWith('.json')) continue
+    const id = f.name.slice(PREFIX.length, -'.json'.length)
+    const updatedAt = Number(f.appProperties?.updatedAt ?? 0) || Date.parse(f.modifiedTime ?? '') || 0
+    const prev = best.get(id)
+    if (prev && prev.updatedAt >= updatedAt) continue
+    best.set(id, { id, title: f.appProperties?.title ?? '', updatedAt })
+    driveIds.set(id, f.id)
   }
+  const list = [...best.values()].sort(byRecent)
+  writeListCache(list)
+  return list
+}
+
+async function driveId(id: string): Promise<string | undefined> {
+  if (!driveIds.has(id)) await driveList()
   return driveIds.get(id)
 }
 
-/** 최근 수정 순 목록. 서버가 정렬해 준다. */
-export async function listChats(apiKey: string): Promise<ChatSummary[]> {
-  if (usingLocal()) {
-    return (await localGetAll<StoredChat>())
-      .map(({ id, title, updatedAt }) => ({ id, title, updatedAt }))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+async function driveSave(chat: StoredChat) {
+  // appProperties 는 키+값 124바이트 한도라 제목을 짧게 자른다.
+  const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt) }
+  const fid = await writeFile(fileName(chat.id), JSON.stringify(chat), props, await driveId(chat.id))
+  driveIds.set(chat.id, fid)
+  updateListCache((l) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt }, ...l.filter((c) => c.id !== chat.id)])
+}
+
+/** 브라우저에 대기 중인 대화를 드라이브로 올린다. 드라이브 쪽이 더 최신이면 올리지 않고 브라우저 사본만 지운다. */
+async function syncPending(remote: ChatSummary[]): Promise<ChatSummary[]> {
+  const pending = await localGetAll<StoredChat>()
+  if (pending.length === 0) return remote
+  const remoteById = new Map(remote.map((c) => [c.id, c]))
+  for (const chat of pending) {
+    const r = remoteById.get(chat.id)
+    if (!r || chat.updatedAt > r.updatedAt) {
+      await driveSave(chat)
+      remoteById.set(chat.id, { id: chat.id, title: chat.title, updatedAt: chat.updatedAt })
+    }
+    await localDelete(chat.id)
   }
+  const list = [...remoteById.values()].sort(byRecent)
+  writeListCache(list)
+  return list
+}
+
+/** 최근 수정 순 목록. 서버가 정렬해 준다. */
+export async function listChats(apiKey: string): Promise<ChatListItem[]> {
   if (USE_DRIVE) {
-    const files = await listFiles(PREFIX)
-    driveIds.clear()
-    return files
-      .map((f) => {
-        const id = f.name.slice(PREFIX.length, -'.json'.length)
-        driveIds.set(id, f.id)
-        return { id, title: f.appProperties?.title ?? '', updatedAt: Number(f.appProperties?.updatedAt ?? 0) }
-      })
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+    if (!usingLocal()) return syncPending(await driveList())
+    // 연결 전·만료: 대기 중(브라우저) + 마지막으로 본 드라이브 목록
+    const pending = (await localGetAll<StoredChat>()).map(({ id, title, updatedAt }) => ({ id, title, updatedAt, pending: true }))
+    const ids = new Set(pending.map((c) => c.id))
+    const cached = readListCache().filter((c) => !ids.has(c.id)).map((c) => ({ ...c, driveOnly: true }))
+    return [...pending, ...cached].sort(byRecent)
   }
   return (await request(apiKey, '/chats')).json()
 }
 
 export async function loadChat(apiKey: string, id: string): Promise<StoredChat | undefined> {
-  if (usingLocal()) return localGet<StoredChat>(id)
   if (USE_DRIVE) {
+    const local = await localGet<StoredChat>(id)
+    if (local || usingLocal()) {
+      // 드라이브에만 있는 대화를 만료 중에 열려고 하면 다시 연결하라고 알린다.
+      if (!local && readListCache().some((c) => c.id === id)) throw new DriveAuthError()
+      return local
+    }
     const fid = await driveId(id)
     const text = fid ? await readFile(fid) : undefined
     return text ? JSON.parse(text) : undefined
@@ -103,13 +168,9 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
 }
 
 export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> {
-  if (usingLocal()) return localPut(chat)
   if (USE_DRIVE) {
-    // appProperties 는 키+값 124바이트 한도라 제목을 짧게 자른다.
-    const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt) }
-    const fid = await writeFile(fileName(chat.id), JSON.stringify(chat), props, await driveId(chat.id))
-    driveIds.set(chat.id, fid)
-    return
+    if (usingLocal()) return localPut(chat)
+    return driveSave(chat)
   }
   await request(apiKey, `/chats/${encodeURIComponent(chat.id)}`, {
     method: 'PUT',
@@ -120,11 +181,17 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<void> 
 }
 
 export async function deleteChat(apiKey: string, id: string): Promise<void> {
-  if (usingLocal()) return localDelete(id)
   if (USE_DRIVE) {
-    const fid = await driveId(id)
-    if (fid) await removeFile(fid)
+    await localDelete(id)
+    if (usingLocal()) {
+      if (readListCache().some((c) => c.id === id)) throw new DriveAuthError()
+      return
+    }
+    // 예전 버전에서 생긴 중복 파일까지 모두 지운다.
+    const files = (await listFiles(fileName(id))).filter((f) => f.name === fileName(id))
+    for (const f of files) await removeFile(f.id)
     driveIds.delete(id)
+    updateListCache((l) => l.filter((c) => c.id !== id))
     return
   }
   await request(apiKey, `/chats/${encodeURIComponent(id)}`, { method: 'DELETE' })
