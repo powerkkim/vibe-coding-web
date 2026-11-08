@@ -42,6 +42,12 @@ interface Props {
   projectName?: string
   // 코딩 모드(수동: 코드를 만들기 전에 확인 / 자동: 스스로 판단)
   codeMode: CodeMode
+  // 컨텍스트 게이지: 지금 대화가 차지한 토큰과 기준(권장 한도). 새 대화로 갈아타기 버튼에 onNewChat 을 쓴다.
+  contextTokens: number
+  contextBudget: number
+  // 이 토큰을 넘으면 단가가 오르는 모델(Haiku)일 때만
+  priceJumpAt?: number
+  onNewChat: () => void
   onCodeModeChange: (m: CodeMode) => void
   onOpenProject?: () => void
   isLoading: boolean
@@ -152,7 +158,7 @@ function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (i
   )
 }
 
-export default function ChatPanel({ codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, onNewChat, codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -334,6 +340,7 @@ export default function ChatPanel({ codeMode, onCodeModeChange, projectName, onO
               </span>
             </span>
             <span className="flex items-center gap-2">
+            {contextTokens > 0 && <ContextGauge used={contextTokens} budget={contextBudget} priceJumpAt={priceJumpAt} onNewChat={onNewChat} disabled={isLoading} />}
             <CodeModeMenu mode={codeMode} onChange={onCodeModeChange} />
             <button onClick={isLoading && !interrupting ? onStop : submit} disabled={!isLoading && !canSend}
               aria-label={interrupting ? '지금 답변을 멈추고 보내기' : isLoading ? '생성 중지' : '전송'}
@@ -546,6 +553,12 @@ export default function ChatPanel({ codeMode, onCodeModeChange, projectName, onO
         )}
       </div>
 
+      {messages.length > 0 && contextTokens >= contextBudget * 0.8 && !isLoading && (
+        <div role="status" className="ctx-banner">
+          <span>컨텍스트가 {Math.min(100, Math.round((contextTokens / contextBudget) * 100))}% 찼어요(최대 1M 토큰). 이어서 대화할수록 매 턴 입력 토큰(비용)이 커지니 새 대화로 옮기는 걸 권해요.</span>
+          <button onClick={onNewChat}>새 대화</button>
+        </div>
+      )}
       {messages.length > 0 && composer}
 
       {/* 사용량: 이번 요청 + 이 브라우저의 오늘·누적 예상 비용. 비용은 단가로 계산한 근사값이다. */}
@@ -636,6 +649,54 @@ function CodeModeMenu({ mode, onChange }: { mode: CodeMode; onChange: (m: CodeMo
               {mode === it.m && <span aria-hidden="true" style={{ color: 'var(--accent)', fontSize: 16 }}>✓</span>}
             </button>
           ))}
+        </div>
+      )}
+    </span>
+  )
+}
+
+const fmtK = (n: number) => (n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K` : String(n))
+
+/** 컨텍스트가 찬 정도(원형 게이지). 누르면 설명과 새 대화 버튼이 뜬다. */
+function ContextGauge({ used, budget, priceJumpAt, onNewChat, disabled }: { used: number; budget: number; priceJumpAt?: number; onNewChat: () => void; disabled: boolean }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false) }
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', esc)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc) }
+  }, [open])
+  const ratio = Math.min(1, used / budget)
+  // 1M 기준이라 작은 값은 0% 로 보이지 않게 소수 한 자리까지
+  const pct = ratio < 0.1 ? Math.round(ratio * 1000) / 10 : Math.round(ratio * 100)
+  const level = ratio >= 0.8 ? 'high' : ratio >= 0.5 ? 'mid' : 'low'
+  const color = level === 'high' ? 'var(--err)' : level === 'mid' ? 'var(--warn)' : 'var(--accent)'
+  const r = 8, c = 2 * Math.PI * r
+  return (
+    <span ref={ref} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button type="button" className="ctx-gauge" aria-haspopup="dialog" aria-expanded={open}
+        aria-label={`컨텍스트 ${pct}% 사용`} onClick={() => setOpen((o) => !o)}>
+        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r={r} fill="none" stroke="var(--border)" strokeWidth="2.5" />
+          <circle cx="10" cy="10" r={r} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"
+            strokeDasharray={`${c * ratio} ${c}`} transform="rotate(-90 10 10)" />
+        </svg>
+        <span style={{ color: level === 'low' ? 'var(--txt-3)' : color }}>{pct}%</span>
+      </button>
+      {open && (
+        <div role="dialog" aria-label="컨텍스트 사용량" className="ctx-pop">
+          <div className="ctx-pop-head">
+            <span>컨텍스트</span>
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtK(used)} / {fmtK(budget)} ({pct}%)</span>
+          </div>
+          <div className="ctx-bar"><span style={{ width: `${pct}%`, background: color }} /></div>
+          <p>대화가 길어질수록 매 턴마다 이전 대화와 파일 전체를 다시 보내기 때문에 <b>대화 중 입력 토큰(비용)이 계속 늘어나요.</b> 캐시로 일부 줄지만, 많이 차면 응답도 느려지고 앞 내용을 덜 정확하게 기억할 수 있어요.</p>
+          {priceJumpAt && <p style={{ color: used > priceJumpAt ? 'var(--err)' : 'var(--txt-3)' }}>이 모델은 입력이 {fmtK(priceJumpAt)} 토큰을 넘으면 단가가 크게 올라요.</p>}
+          <p style={{ color: 'var(--txt-3)' }}>기준은 모델의 최대 컨텍스트(1M 토큰)예요. 50%부터 노란색, 80%부터 빨간색으로 바뀌어요. 주제가 바뀌었거나 많이 찼다면 새 대화로 옮기세요. 프로젝트 대화면 같은 프로젝트에서 새 대화가 열려요.</p>
+          <button className="ctx-pop-new" disabled={disabled} onClick={() => { setOpen(false); onNewChat() }}>새 대화로 갈아타기</button>
         </div>
       )}
     </span>

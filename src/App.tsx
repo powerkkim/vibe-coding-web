@@ -30,7 +30,7 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
 import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
@@ -167,7 +167,12 @@ export default function App() {
   const handleBalanceChange = (amount: number | null) => setBalanceState(setBalance(amount))
   // 한 턴(질문 1개)이 도구 왕복으로 요청 여러 번이 될 수 있어, '이번' 표시는 턴 안에서 합산한다. 누적·잔액은 요청마다 더한다.
   const turnUsageRef = useRef<{ usage: TokenUsage; cost: number } | null>(null)
+  // 지금 대화가 차지한 컨텍스트(가장 최근 요청의 입력 전체 + 출력). 다음 턴에 이만큼이 다시 입력으로 간다.
+  const [contextTokens, setContextTokens] = useState(0)
+  const contextTokensRef = useRef(0)
   const recordUsage = (usage: TokenUsage) => {
+    contextTokensRef.current = usage.promptTokens + usage.completionTokens
+    setContextTokens(contextTokensRef.current)
     const cost = estimateCost(activeModel, usage)
     const prev = turnUsageRef.current
     const sum: TokenUsage = prev ? {
@@ -985,6 +990,7 @@ export default function App() {
           // 인용된 출처를 앞에, 최대 10개
           ...(sourcesRef.current.size ? { sources: [...sourcesRef.current.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
           ...(outputFilesRef.current.length ? { outputs: [...outputFilesRef.current] } : {}),
+          ...(contextTokensRef.current ? { ctx: contextTokensRef.current } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
           ...(Object.keys(files).length > 0 ? { snapshot: projectFilesRef.current, projectType: pType } : {}),
@@ -1095,6 +1101,8 @@ export default function App() {
     setAnswerIndex(null)
     setVersionIndex(null)
     setTokenUsage(null)
+    contextTokensRef.current = 0
+    setContextTokens(0)
     setLastCost(0)
     setSessionKey((k) => k + 1)
     setCanvasClosed(false)
@@ -1128,6 +1136,11 @@ export default function App() {
       bindChatProject(chat.id, projects.find((p) => p.id === chat.projectId))
       chatCreatedAtRef.current = chat.createdAt
       setMessages(chat.messages)
+      {
+        const lastCtx = [...chat.messages].reverse().find((m) => m.role === 'assistant' && m.ctx)?.ctx ?? 0
+        contextTokensRef.current = lastCtx
+        setContextTokens(lastCtx)
+      }
       projectFilesRef.current = chat.projectFiles
       setProjectFiles(chat.projectFiles)
       setProjectType(chat.projectType)
@@ -1295,6 +1308,10 @@ export default function App() {
             hasApiKey={!!activeApiKey}
             width={isMobile || !canvasOpen ? undefined : chatWidth}
             tokenUsage={tokenUsage}
+            contextTokens={contextTokens}
+            contextBudget={contextBudget(activeModel)}
+            priceJumpAt={longPromptThreshold(activeModel)}
+            onNewChat={() => (chatProjectIdRef.current ? handleNewChatInProject(chatProjectIdRef.current) : handleNewChat())}
             balance={balance}
             onBalanceChange={handleBalanceChange}
             lastCost={lastCost}
