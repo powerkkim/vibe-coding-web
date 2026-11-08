@@ -1,4 +1,4 @@
-import { DRIVE_API, DRIVE_UPLOAD, driveRequest, hasFileScope, hasReadScope } from './drive'
+import { currentAccessToken, DRIVE_API, DRIVE_UPLOAD, driveRequest, hasFileScope } from './drive'
 
 /**
  * 내 드라이브에 '보이는' 파일로 내보내기 (drive.file 권한)
@@ -171,42 +171,7 @@ export async function readFromProject(chatId: string, title: string, path: strin
   return (await fetchContent(file.id, file.mimeType)).text()
 }
 
-// ── 드라이브 전체 읽기(drive.readonly) ───────────────────────
-// 검색·폴더 탐색·읽기는 드라이브 전체에서 하고, 쓰기는 Vibe Coding 폴더에서만 한다(A안: 가져와서 사본을 고친다).
-export class ReadScopeError extends Error {
-  constructor() { super('드라이브 전체를 읽으려면 권한 추가가 필요합니다') }
-}
-function requireRead() {
-  if (!hasReadScope()) throw new ReadScopeError()
-}
-
-export interface DriveItem { id: string; name: string; mimeType: string; modifiedTime?: string; size?: string; isFolder: boolean }
-const ITEM_FIELDS = 'files(id,name,mimeType,modifiedTime,size)'
-const toItem = (f: Record<string, string>): DriveItem => ({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: f.size, isFolder: f.mimeType === FOLDER })
-
-/** 이름·본문으로 드라이브 전체 검색(휴지통 제외, 최근 수정 순, 최대 30개) */
-export async function searchDrive(text: string): Promise<DriveItem[]> {
-  requireRead()
-  const t = q(text.trim())
-  if (!t) return []
-  const query = `(name contains '${t}' or fullText contains '${t}') and trashed = false`
-  const res = await driveRequest(`${DRIVE_API}/files?q=${encodeURIComponent(query)}&pageSize=30&orderBy=modifiedTime desc&fields=${ITEM_FIELDS}`)
-  return (await json<{ files: Record<string, string>[] }>(res)).files.map(toItem)
-}
-
-/** 폴더 안 목록. folderId 가 없으면 '내 드라이브' 최상위 */
-export async function browseDrive(folderId = 'root'): Promise<DriveItem[]> {
-  requireRead()
-  const query = `'${q(folderId)}' in parents and trashed = false`
-  const res = await driveRequest(`${DRIVE_API}/files?q=${encodeURIComponent(query)}&pageSize=200&orderBy=folder,name&fields=${ITEM_FIELDS}`)
-  return (await json<{ files: Record<string, string>[] }>(res)).files.map(toItem)
-}
-
-async function metadata(id: string): Promise<DriveItem> {
-  const res = await driveRequest(`${DRIVE_API}/files/${encodeURIComponent(id)}?fields=id,name,mimeType,modifiedTime,size`)
-  return toItem(await json<Record<string, string>>(res))
-}
-
+// ── 가져오기(A안): 사용자가 선택창에서 고른 파일을 프로젝트 폴더로 '복사'한다. 원본은 건드리지 않는다. ──
 const GOOGLE_EXPORT: Record<string, { mime: string; ext: string }> = {
   'application/vnd.google-apps.document': { mime: 'text/markdown', ext: 'md' },
   'application/vnd.google-apps.spreadsheet': { mime: 'text/csv', ext: 'csv' },
@@ -216,7 +181,7 @@ const GOOGLE_EXPORT: Record<string, { mime: string; ext: string }> = {
 /** 파일 내용. Google 문서·시트·슬라이드는 텍스트(마크다운·CSV)로 내보내서 받는다. */
 async function fetchContent(id: string, mimeType?: string): Promise<Blob> {
   const exp = mimeType ? GOOGLE_EXPORT[mimeType] : undefined
-  if (mimeType?.startsWith('application/vnd.google-apps.') && !exp) throw new Error('이 Google 형식은 읽을 수 없습니다(문서·시트·슬라이드만 가능)')
+  if (mimeType?.startsWith('application/vnd.google-apps.') && !exp) throw new Error('이 Google 형식은 가져올 수 없습니다(문서·시트·슬라이드만 가능)')
   const url = exp ? `${DRIVE_API}/files/${id}/export?mimeType=${encodeURIComponent(exp.mime)}` : `${DRIVE_API}/files/${id}?alt=media`
   const res = await driveRequest(url)
   if (!res.ok) throw new Error(`파일을 읽지 못했습니다 (HTTP ${res.status})`)
@@ -224,36 +189,78 @@ async function fetchContent(id: string, mimeType?: string): Promise<Blob> {
 }
 
 const TEXT_EXT = /\.(html?|css|js|mjs|jsx|ts|tsx|vue|json|md|txt|csv|svg|xml|ya?ml)$/i
-const isTextLike = (name: string, mimeType: string) => TEXT_EXT.test(name) || mimeType.startsWith('text/') || mimeType in GOOGLE_EXPORT || mimeType === 'application/json'
-/** 읽기·가져오기로 대화(프로젝트)에 넣는 텍스트 최대 크기. 넘으면 폴더에 복사만 한다(토큰 절약). */
+/** 프로젝트에 넣을 텍스트 파일 최대 크기. 이보다 크면 폴더에 복사만 하고 대화에는 넣지 않는다(토큰 절약). */
 export const IMPORT_TEXT_LIMIT = 200_000
-
-/** 드라이브 파일을 텍스트로 읽는다(복사하지 않음). 텍스트가 아니면 오류. */
-export async function readDriveFile(id: string, maxChars = 30_000): Promise<{ item: DriveItem; text: string; truncated: boolean }> {
-  requireRead()
-  const item = await metadata(id)
-  if (item.isFolder) throw new Error(`${item.name} 은(는) 폴더입니다`)
-  if (!isTextLike(item.name, item.mimeType)) throw new Error(`${item.name} 은(는) 텍스트 파일이 아니라 읽을 수 없습니다(가져오기로 프로젝트 폴더에 복사는 가능)`)
-  const text = await (await fetchContent(id, item.mimeType)).text()
-  return { item, text: text.slice(0, maxChars), truncated: text.length > maxChars }
-}
 
 export interface ImportedFile { path: string; text?: string; size: number; source: string }
 
 /**
- * 가져오기(A안): 드라이브 파일을 프로젝트 폴더의 imports/ 로 '복사'한다. 원본은 건드리지 않는다.
- * 텍스트 파일이면 내용도 돌려준다 → 앱이 프로젝트 파일에 넣어 Claude 가 고칠 수 있고, 고친 결과는 자동 저장으로 사본에 반영된다.
+ * 고른 파일을 프로젝트 폴더의 imports/ 아래로 복사한다.
+ * 텍스트 파일이면 내용도 돌려준다 → 앱이 프로젝트 파일에 넣어 Claude 가 읽고 고칠 수 있게 하고, 고친 결과는 자동 저장으로 사본에 반영된다.
  */
-export async function importDriveFile(chatId: string, title: string, id: string): Promise<ImportedFile> {
-  requireRead()
+export async function importPicked(chatId: string, title: string, picked: { id: string; name: string; mimeType?: string }): Promise<ImportedFile> {
   requireScope()
-  const item = await metadata(id)
-  if (item.isFolder) throw new Error(`${item.name} 은(는) 폴더라 가져올 수 없습니다`)
-  const exp = GOOGLE_EXPORT[item.mimeType]
-  const name = exp && !item.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${item.name}.${exp.ext}` : item.name
-  const blob = await fetchContent(id, item.mimeType)
+  const exp = picked.mimeType ? GOOGLE_EXPORT[picked.mimeType] : undefined
+  const name = exp && !picked.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${picked.name}.${exp.ext}` : picked.name
+  const blob = await fetchContent(picked.id, picked.mimeType)
   const path = `imports/${name.replace(/[\\/]+/g, '_')}`
   await saveToProject(chatId, title, path, blob)
-  const isText = isTextLike(name, item.mimeType) && blob.size <= IMPORT_TEXT_LIMIT
-  return { path, size: blob.size, source: item.name, ...(isText ? { text: await blob.text() } : {}) }
+  const isText = TEXT_EXT.test(name) && blob.size <= IMPORT_TEXT_LIMIT
+  return { path, size: blob.size, source: picked.name, ...(isText ? { text: await blob.text() } : {}) }
+}
+
+// ── Google 선택창(Picker) ───────────────────────────────────
+// Picker 는 개발자 API 키와 앱 ID(Cloud 프로젝트 번호)가 필요하다. 둘 다 공개돼도 되는 값이다(리퍼러 제한 권장).
+const PICKER_KEY = (import.meta.env.VITE_GOOGLE_API_KEY as string | undefined)?.trim() || ''
+const APP_ID = (import.meta.env.VITE_GOOGLE_APP_ID as string | undefined)?.trim() || ''
+export const isPickerConfigured = () => !!PICKER_KEY && !!APP_ID
+
+type PickerDoc = { id: string; name: string; mimeType?: string }
+type Gapi = { load: (lib: string, cb: () => void) => void }
+type PickerNS = {
+  DocsView: new (viewId?: unknown) => { setIncludeFolders: (b: boolean) => unknown; setSelectFolderEnabled: (b: boolean) => unknown }
+  ViewId: { DOCS: unknown }
+  Action: { PICKED: string; CANCEL: string }
+  PickerBuilder: new () => Record<string, (...a: unknown[]) => unknown>
+}
+let pickerLoading: Promise<void> | null = null
+function loadPicker(): Promise<void> {
+  const w = window as unknown as { gapi?: Gapi; google?: { picker?: PickerNS } }
+  if (w.google?.picker) return Promise.resolve()
+  pickerLoading ??= new Promise((resolve, reject) => {
+    const done = () => w.gapi!.load('picker', () => resolve())
+    if (w.gapi) return done()
+    const s = document.createElement('script')
+    s.src = 'https://apis.google.com/js/api.js'
+    s.async = true
+    s.onload = done
+    s.onerror = () => { pickerLoading = null; reject(new Error('Google 선택창을 불러오지 못했습니다')) }
+    document.head.appendChild(s)
+  })
+  return pickerLoading
+}
+
+/** 선택창을 띄워 파일 하나를 고르게 한다. 취소하면 null. */
+export async function pickDriveFile(): Promise<PickerDoc | null> {
+  if (!isPickerConfigured()) throw new Error('Google 선택창 설정(VITE_GOOGLE_API_KEY, VITE_GOOGLE_APP_ID)이 없습니다')
+  requireScope()
+  const token = currentAccessToken()
+  if (!token) throw new FileScopeError()
+  await loadPicker()
+  const picker = (window as unknown as { google: { picker: PickerNS } }).google.picker
+  return new Promise((resolve) => {
+    const view = new picker.DocsView(picker.ViewId.DOCS)
+    view.setIncludeFolders(true)
+    let b = new picker.PickerBuilder()
+    b = b.addView(view) as typeof b
+    b = b.setOAuthToken(token) as typeof b
+    b = b.setDeveloperKey(PICKER_KEY) as typeof b
+    b = b.setAppId(APP_ID) as typeof b
+    b = b.setTitle('가져올 파일 선택 (프로젝트 폴더로 복사됩니다)') as typeof b
+    b = b.setCallback((data: { action: string; docs?: PickerDoc[] }) => {
+      if (data.action === picker.Action.PICKED && data.docs?.[0]) resolve(data.docs[0])
+      else if (data.action === picker.Action.CANCEL) resolve(null)
+    }) as typeof b
+    ;(b.build() as { setVisible: (v: boolean) => void }).setVisible(true)
+  })
 }
