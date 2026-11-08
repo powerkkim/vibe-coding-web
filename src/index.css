@@ -689,3 +689,10 @@
 .sources ol { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .sources a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-word; }
 .sources-host { margin-left: 6px; color: var(--txt-3); }
+
+/* 드라이브 첨부 칩(사진 첨부처럼) */
+.file-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 32px; padding: 0 6px 0 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); font-size: var(--fs-xs); color: var(--txt); }
+.file-chip-size { color: var(--txt-3); flex-shrink: 0; }
+.file-chip-x { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; color: var(--txt-3); flex-shrink: 0; }
+.file-chip-x:hover { background: var(--bg-hover); color: var(--txt); }

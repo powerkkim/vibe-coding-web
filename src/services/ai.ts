@@ -6,12 +6,30 @@ export interface MessageImage {
   data: string
 }
 
+/**
+ * 메시지에 붙인 문서(드라이브에서 첨부). 보낼 때 내용을 받아 둔다.
+ * - pdf: base64 PDF → Claude 가 글·표·그림까지 읽는다
+ * - text: 텍스트(문서·시트는 마크다운·CSV 로 변환)
+ * - ref: 너무 커서 내용은 넣지 않고 이름·위치만 알림 → 필요하면 drive_files read_attachment 로 읽는다
+ */
+export interface MessageDoc {
+  name: string
+  kind: 'pdf' | 'text' | 'ref'
+  size: number
+  data?: string
+  text?: string
+  driveId?: string
+  mimeType?: string
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
   files?: Record<string, string>
   projectType?: 'html' | 'react' | 'vue'
   images?: MessageImage[]
+  // 드라이브에서 첨부한 문서(PDF·텍스트). 사진 첨부와 같은 방식으로 그 메시지에 실린다.
+  docs?: MessageDoc[]
   // 생성 중 생각 요약(모델 옵션 '생각 요약 보기')·웹 검색 진행 표시. 본문이 나오기 전까지만 보여준다.
   thinking?: string
   // 웹 검색 출처. 답변이 인용한 페이지(cited)와, 검색했지만 인용하지 않은 페이지. 화면에만 쓰고 API 로는 보내지 않는다.
@@ -343,6 +361,14 @@ Refinements of an existing project never go through this step.`
 type ApiBlock =
   | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'document'; title: string; source: { type: 'base64'; media_type: 'application/pdf'; data: string } | { type: 'text'; media_type: 'text/plain'; data: string } }
+
+/** 첨부 문서 → API 블록. 이미지처럼 텍스트 앞에 둔다(캐시 지점 앞이라 다음 턴부터는 캐시로 읽힌다). */
+function docBlock(d: MessageDoc): ApiBlock {
+  if (d.kind === 'pdf' && d.data) return { type: 'document', title: d.name, source: { type: 'base64', media_type: 'application/pdf', data: d.data } }
+  if (d.kind === 'text' && d.text !== undefined) return { type: 'document', title: d.name, source: { type: 'text', media_type: 'text/plain', data: d.text || '(빈 파일)' } }
+  return { type: 'text', text: `[첨부 파일: ${d.name} (${Math.round(d.size / 1024)}KB) — 커서 내용은 넣지 않았습니다. 필요하면 drive_files 도구의 read_attachment 명령으로 이 이름을 읽으세요.]` }
+}
 
 /**
  * 앱 메시지 → API 메시지.
@@ -358,6 +384,7 @@ function apiMessages(all: Message[]): { role: 'user' | 'assistant'; content: str
   return messages.map((m, i) => {
     const blocks: ApiBlock[] = [
       ...(m.images ?? []).map((img) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: img.mediaType, data: img.data } })),
+      ...(m.docs ?? []).map(docBlock),
       { type: 'text' as const, text: m.content || '(내용 없음)', ...(i === lastUser ? { cache_control: { type: 'ephemeral' as const } } : {}) },
     ]
     return { role: m.role, content: blocks.length === 1 && i !== lastUser ? m.content || '(내용 없음)' : blocks }

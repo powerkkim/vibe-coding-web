@@ -2,6 +2,7 @@
 import { ArrowUp, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
 import AnswerView from './AnswerView'
 import type { Message, MessageImage, TokenUsage } from '../services/ai'
+import type { PickerDoc } from '../services/driveExport'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
 import { formatUsd, remainingBalance } from '../services/usage'
 import { GoogleDrive } from '../icons'
@@ -24,7 +25,7 @@ const BILLING_URL = 'https://platform.claude.com/dashboard'
  */
 interface Props {
   messages: Message[]
-  onSend: (prompt: string, images: MessageImage[]) => void
+  onSend: (prompt: string, images: MessageImage[], driveFiles?: PickerDoc[]) => void
   // 생성 중에 전송 버튼 자리의 중지 버튼이 부른다.
   onStop: () => void
   // 오류로 끊긴 마지막 답변의 질문을 다시 보낸다.
@@ -33,9 +34,10 @@ interface Props {
   onContinue: () => void
   // 코드 실행 결과 파일을 내 드라이브 프로젝트 폴더에 저장(드라이브 방식일 때만). 폴더 주소를 돌려준다.
   onSaveOutputToDrive?: (fileId: string) => Promise<string>
-  // 드라이브에서 파일 가져오기(선택창 → 프로젝트 폴더로 복사). 설정이 없으면 버튼을 숨긴다.
-  onImportFromDrive?: () => void
-  importNotice?: string
+  // 드라이브 파일 첨부(선택창). 고른 파일 정보만 돌려주고, 내용은 보낼 때 받는다. 설정이 없으면 버튼을 숨긴다.
+  onPickDriveFile?: () => Promise<PickerDoc | null>
+  // 보낼 때 첨부 파일을 받지 못한 경우 등
+  attachError?: string
   isLoading: boolean
   hasApiKey: boolean
   width?: number
@@ -74,6 +76,16 @@ function Dots() {
       ))}
     </span>
   )
+}
+
+const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`)
+function fileIcon(name: string, mime?: string) {
+  if (mime === 'application/pdf' || /\.pdf$/i.test(name)) return '📕'
+  if (mime?.includes('spreadsheet') || /\.(csv|xlsx?)$/i.test(name)) return '📗'
+  if (mime?.includes('presentation')) return '📙'
+  if (mime?.startsWith('image/')) return '🖼'
+  if (mime?.includes('document')) return '📘'
+  return '📄'
 }
 
 /** 도구 진행 줄(🔎🌐⚙️🧠💾✏️ 로 시작) 중 마지막 것 */
@@ -134,7 +146,7 @@ function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (i
   )
 }
 
-export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onImportFromDrive, importNotice, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -151,6 +163,18 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
   const taRef = useRef<HTMLTextAreaElement>(null)
   // 보내기 전 이미지(🖼 버튼·붙여넣기·끌어다 놓기로 추가)
   const [images, setImages] = useState<MessageImage[]>([])
+  // 드라이브에서 고른 첨부(정보만). 보낼 때 App 이 내용을 받아 메시지에 싣는다.
+  const [driveFiles, setDriveFiles] = useState<PickerDoc[]>([])
+  const pickDrive = async () => {
+    if (!onPickDriveFile) return
+    setImageError('')
+    try {
+      const f = await onPickDriveFile()
+      if (f && !driveFiles.some((d) => d.id === f.id)) setDriveFiles((prev) => [...prev, f].slice(0, 5))
+    } catch (e) {
+      setImageError(e instanceof Error ? e.message : '드라이브 파일을 고르지 못했어요')
+    }
+  }
   const [imageError, setImageError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -190,8 +214,8 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
   const submit = () => {
     const t = input.trim()
     // 생성 중에 보내면 '끼어들어 말하기': 지금 답변을 멈추고 이 메시지를 이어서 보낸다(App 이 처리).
-    if ((!t && images.length === 0) || !hasApiKey) return
-    onSend(t, images); setInput(''); setImages([]); setImageError('')
+    if ((!t && images.length === 0 && driveFiles.length === 0) || !hasApiKey) return
+    onSend(t, images, driveFiles); setInput(''); setImages([]); setDriveFiles([]); setImageError('')
     if (taRef.current) taRef.current.style.height = 'auto'
   }
 
@@ -205,7 +229,7 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
     e.target.style.height = Math.min(e.target.scrollHeight, 180) + 'px'
   }
 
-  const hasDraft = !!input.trim() || images.length > 0
+  const hasDraft = !!input.trim() || images.length > 0 || driveFiles.length > 0
   const canSend = hasDraft && hasApiKey
   // 생성 중 + 입력 없음 → 정지 버튼, 생성 중 + 입력 있음 → 끼어들어 보내기
   const interrupting = isLoading && hasDraft
@@ -220,12 +244,10 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
             API 키가 없습니다. 상단의 API 키 버튼에서 입력해 주세요.
           </div>
         )}
-        {imageError && (
-          <p role="alert" style={{ color: 'var(--err)', fontSize: 'var(--fs-xs)', margin: '0 4px 6px' }}>{imageError}</p>
+        {(imageError || attachError) && (
+          <p role="alert" style={{ color: 'var(--err)', fontSize: 'var(--fs-xs)', margin: '0 4px 6px' }}>{imageError || attachError}</p>
         )}
-        {importNotice && (
-          <p role="status" style={{ color: 'var(--txt-2)', fontSize: 'var(--fs-xs)', margin: '0 4px 6px' }}>{importNotice}</p>
-        )}
+
         {/* 화면에는 보이지 않고, 생성 시작·끝을 스크린리더에 알린다. */}
         <span className="sr-only" aria-live="polite">
           {isLoading ? '응답을 생성하고 있습니다' : messages.length > 0 ? '응답이 끝났습니다' : ''}
@@ -239,6 +261,20 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
             borderRadius: 'var(--radius-lg)',
             boxShadow: '0 1px 3px rgba(20,20,19,0.06)',
           }}>
+          {driveFiles.length > 0 && (
+            <div className="flex flex-wrap gap-2" style={{ padding: '10px 12px 0' }}>
+              {driveFiles.map((f) => (
+                <span key={f.id} className="file-chip" title={f.name}>
+                  <span aria-hidden="true">{fileIcon(f.name, f.mimeType)}</span>
+                  <span className="truncate">{f.name}</span>
+                  {f.sizeBytes ? <span className="file-chip-size">{fmtSize(f.sizeBytes)}</span> : null}
+                  <button onClick={() => setDriveFiles((prev) => prev.filter((d) => d.id !== f.id))} aria-label={`${f.name} 첨부 빼기`} className="file-chip-x">
+                    <X style={{ width: 12, height: 12 }} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {images.length > 0 && (
             <div className="flex flex-wrap gap-2" style={{ padding: '10px 12px 0' }}>
               {images.map((img, k) => (
@@ -273,8 +309,8 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
           />
           <div className="flex items-center justify-between px-3 pb-2.5">
             <span className="flex items-center gap-2">
-              {onImportFromDrive && (
-                <button onClick={onImportFromDrive} disabled={!hasApiKey} aria-label="드라이브에서 파일 가져오기 (프로젝트 폴더로 복사)" className="icon-btn tip-up">
+              {onPickDriveFile && (
+                <button onClick={pickDrive} disabled={!hasApiKey || driveFiles.length >= 5} aria-label="드라이브 파일 첨부" className="icon-btn tip-up">
                   <GoogleDrive style={{ width: 16, height: 16 }} />
                 </button>
               )}
@@ -367,6 +403,17 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
               msg.role === 'user' ? (
                 /* 사용자 메시지: 오른쪽 말풍선 */
                 <div key={i} className="flex flex-col items-end gap-1.5">
+                  {msg.docs && msg.docs.length > 0 && (
+                    <div className="flex flex-wrap justify-end gap-1.5" style={{ maxWidth: '85%' }}>
+                      {msg.docs.map((d, k) => (
+                        <span key={k} className="file-chip" title={d.kind === 'ref' ? `${d.name} — 커서 필요할 때 읽어요` : d.name}>
+                          <span aria-hidden="true">{fileIcon(d.name, d.mimeType)}</span>
+                          <span className="truncate">{d.name}</span>
+                          <span className="file-chip-size">{d.kind === 'ref' ? '필요할 때 읽음' : fmtSize(d.size)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {msg.images && msg.images.length > 0 && (
                     <div className="flex flex-wrap justify-end gap-1.5" style={{ maxWidth: '85%' }}>
                       {msg.images.map((img, k) => (
