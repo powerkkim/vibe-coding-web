@@ -1,5 +1,5 @@
 import type { Message } from './ai'
-import { driveAccount, DriveAuthError, driveMinutesLeft, isDriveConfigured, isDriveConnected, isDriveExpired, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
+import { driveAccount, DriveAuthError, driveMinutesLeft, hasFileScope, isDriveConfigured, isDriveConnected, isDriveExpired, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
 import { backupForget, backupGet, backupGetAll, backupPut, localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
@@ -312,7 +312,7 @@ export async function storageStatusLine(): Promise<string> {
   const pending = (await localGetAll<LocalCopy>().catch(() => [] as LocalCopy[])).filter(sameAccount).length
   const wait = pending ? ` ${pending} chat(s) are waiting in this browser to be uploaded.` : ''
   if (!isDriveConfigured()) return 'Google Drive is not configured (no client ID); chats are saved only in this browser (IndexedDB) and can be lost if browser data is cleared.'
-  if (isDriveConnected()) return `Google Drive is connected as ${driveAccount()?.email ?? 'unknown account'}; every chat is saved automatically to its hidden app folder and listed in the left sidebar. Sign-in valid for about ${driveMinutesLeft()} more minutes (renews silently on the next click).${wait}`
+  if (isDriveConnected()) return `Google Drive is connected as ${driveAccount()?.email ?? 'unknown account'}; every chat is saved automatically to its hidden app folder and listed in the left sidebar. ${hasFileScope() ? 'Visible-file saving is allowed: project files go to "My Drive/Vibe Coding/<project>".' : 'Visible-file saving (Vibe Coding folder) is not allowed yet; the user must press "권한 추가".'} Sign-in valid for about ${driveMinutesLeft()} more minutes (renews silently on the next click).${wait}`
   if (isDriveExpired()) return `Google Drive sign-in for ${driveAccount()?.email} has expired; chats are kept in this browser for now and upload automatically after reconnecting (any click reconnects).${wait}`
   return `Google Drive is not connected; chats are saved only in this browser and can be lost if browser data is cleared.${wait}`
 }

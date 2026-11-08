@@ -2,7 +2,10 @@
  * Google 드라이브 저장소 (Cloudflare Worker 대신)
  *
  * 브라우저에서 Google Identity Services(GIS)로 액세스 토큰을 받아 Drive REST API 를 직접 호출한다.
- * 범위는 drive.appdata 하나뿐이라, 이 앱이 만든 숨김 폴더(appDataFolder)만 읽고 쓴다. 사용자의 다른 드라이브 파일은 보지 못한다.
+ * 범위
+ * - drive.appdata: 대화·메모리 저장용 숨김 폴더(appDataFolder). 사용자 눈에 안 보인다.
+ * - drive.file: 앱이 만든 파일·폴더만 '내 드라이브'에 보이게 만들고 고칠 수 있다(프로젝트 파일 내보내기, driveExport.ts).
+ *   사용자의 다른 드라이브 파일은 둘 다 보지 못한다. 둘 다 Google 기준 비민감 범위라 별도 심사가 없다.
  * 대화 1건 = appDataFolder 안의 chat-<id>.json 파일 1개. 목록용 제목·수정 시각은 appProperties 에 둬서 본문을 열지 않는다.
  *
  * 필요한 설정: VITE_GOOGLE_CLIENT_ID (Google Cloud 콘솔 → OAuth 클라이언트 ID, 웹 애플리케이션).
@@ -11,7 +14,11 @@
 
 export const GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined)?.trim() || ''
 
-const SCOPE = 'https://www.googleapis.com/auth/drive.appdata'
+const SCOPE_APPDATA = 'https://www.googleapis.com/auth/drive.appdata'
+const SCOPE_FILE = 'https://www.googleapis.com/auth/drive.file'
+// drive.file 을 한 번 허용받았으면 이후 재로그인에도 함께 요청한다(이미 동의했으므로 동의 화면 없이 지나간다).
+const FILE_SCOPE_KEY = 'vibe_gdrive_file_scope'
+const fileScopeConsented = () => { try { return localStorage.getItem(FILE_SCOPE_KEY) === '1' } catch { return false } }
 const TOKEN_KEY = 'vibe_gdrive_token'
 // 연결했던 Google 계정. 토큰이 만료돼도 남겨 두고, 다시 연결할 때 같은 계정으로 계정 선택 없이 바로 붙인다.
 // '연결 해제'를 눌렀을 때만 지운다.
@@ -24,13 +31,13 @@ export class DriveAuthError extends Error {
   constructor() { super('Google 드라이브 연결이 필요합니다') }
 }
 
-interface TokenResponse { access_token?: string; expires_in?: number; error?: string; error_description?: string }
+interface TokenResponse { access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string }
 interface TokenClient { requestAccessToken: (o?: { prompt?: string }) => void; callback: (r: TokenResponse) => void; error_callback?: (e: { type: string; message?: string }) => void }
 declare global {
   interface Window { google?: { accounts: { oauth2: { initTokenClient: (c: Record<string, unknown>) => TokenClient; revoke: (t: string, cb?: () => void) => void } } } }
 }
 
-type Saved = { token: string; expiresAt: number }
+type Saved = { token: string; expiresAt: number; scope?: string }
 export type DriveAccount = { email: string; name?: string }
 let saved: Saved | null = readSaved()
 let account: DriveAccount | null = readAccount()
@@ -79,6 +86,8 @@ export function isDriveConnected() { return !!saved && saved.expiresAt > Date.no
 /** 연결했던 적이 있는데 토큰이 만료된 상태. 화면에 '다시 연결'을 띄운다. */
 export function isDriveExpired() { return !!account && !isDriveConnected() }
 export function driveAccount() { return account }
+/** 지금 토큰에 drive.file(내 드라이브에 보이는 파일 저장) 권한이 있는가 */
+export function hasFileScope() { return isDriveConnected() && !!saved?.scope?.includes(SCOPE_FILE) }
 /** 토큰 남은 시간(분). 연결 안 됐으면 null */
 export function driveMinutesLeft() { return saved ? Math.max(0, Math.round((saved.expiresAt - Date.now()) / 60_000)) : null }
 export function onDriveChange(fn: (connected: boolean) => void) { listeners.add(fn); return () => { listeners.delete(fn) } }
@@ -102,6 +111,7 @@ function loadGis(): Promise<void> {
 // 브라우저가 막지 않으므로, 스크립트 로드·클라이언트 생성을 미리 끝내 두는 것이 '살며시 재로그인'의 핵심이다.
 let client: TokenClient | null = null
 let clientHint: string | undefined
+let clientScope = ''
 let waiting: { resolve: () => void; reject: (e: Error) => void } | null = null
 let renewing: Promise<void> | null = null
 
@@ -109,7 +119,8 @@ function onToken(r: TokenResponse) {
   const w = waiting
   waiting = null
   if (!r.access_token) return w?.reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
-  const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000 }
+  const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000, scope: r.scope }
+  if (r.scope?.includes(SCOPE_FILE)) { try { localStorage.setItem(FILE_SCOPE_KEY, '1') } catch { /* 무시 */ } }
   // 어느 계정에 붙었는지 확인해 기억한다(목록 표시·다음 재연결의 login_hint). 실패해도 연결은 유지한다.
   fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
     .then((res) => (res.ok ? res.json() : null))
@@ -120,13 +131,20 @@ function onToken(r: TokenResponse) {
     .finally(() => { setSaved(token); w?.resolve() })
 }
 
-function ensureClient(): TokenClient | null {
+/**
+ * withFiles: drive.file 도 요청할지. 처음 연결이거나 이미 동의했으면 함께, 예전에 숨김 폴더만 허용한 계정은
+ * '권한 추가'를 눌렀을 때만 요청한다(클릭 없이 동의 화면이 뜨지 않게).
+ */
+function ensureClient(withFiles = !account || fileScopeConsented()): TokenClient | null {
   if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) return null
-  if (!client || clientHint !== account?.email) {
+  const scope = withFiles ? `${SCOPE_APPDATA} ${SCOPE_FILE}` : SCOPE_APPDATA
+  if (!client || clientHint !== account?.email || clientScope !== scope) {
     clientHint = account?.email
+    clientScope = scope
     client = window.google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: SCOPE,
+      scope,
+      include_granted_scopes: true,
       ...(account ? { login_hint: account.email } : {}),
       callback: onToken,
       error_callback: (e: { type: string; message?: string }) => {
@@ -159,13 +177,17 @@ export async function waitForRenewal(): Promise<void> {
  * GIS 토큰은 1시간짜리이고 갱신 토큰이 없다. 연결했던 계정이 있으면 login_hint + prompt '' 로
  * 동의·계정 선택 없이 팝업이 잠깐 떴다 닫힌다. 처음 연결이면 계정 선택을 띄운다.
  */
-export async function connectDrive(): Promise<void> {
+export async function connectDrive(opts: { withFiles?: boolean } = {}): Promise<void> {
   if (!GOOGLE_CLIENT_ID) throw new Error('VITE_GOOGLE_CLIENT_ID 가 설정되지 않았습니다')
   if (renewing) return renewing
+  const withFiles = opts.withFiles ?? (!account || fileScopeConsented())
   // 스크립트가 아직 없으면 불러온 뒤 연다(첫 연결). 이때는 팝업이 막힐 수 있어 미리 로드해 둔다(아래 자동 갱신).
-  const c = ensureClient() ?? (await loadGis(), ensureClient())
+  const c = ensureClient(withFiles) ?? (await loadGis(), ensureClient(withFiles))
   if (!c) throw new Error('Google 로그인 스크립트를 불러오지 못했습니다')
-  return requestToken(c, account ? '' : 'select_account')
+  // 권한 추가는 동의 화면이 필요하다. 그 외에는 기억한 계정으로 조용히.
+  const upgrading = withFiles && !!account && !fileScopeConsented()
+  await requestToken(c, upgrading ? 'consent' : account ? '' : 'select_account')
+  if (withFiles && !hasFileScope()) throw new Error('드라이브 파일 저장 권한이 허용되지 않았습니다')
 }
 
 // ── 살며시 재로그인 ──────────────────────────────────────────
@@ -200,9 +222,15 @@ installAutoRenew()
 export function disconnectDrive() {
   const t = saved?.token
   setAccount(null)
+  try { localStorage.removeItem(FILE_SCOPE_KEY) } catch { /* 무시 */ }
   setSaved(null)
   if (t) window.google?.accounts.oauth2.revoke(t)
 }
+
+/** 다른 모듈(driveExport)용 공개 요청 함수 */
+export function driveRequest(url: string, init: RequestInit = {}) { return driveFetch(url, init) }
+export const DRIVE_API = API
+export const DRIVE_UPLOAD = UPLOAD
 
 async function driveFetch(url: string, init: RequestInit = {}): Promise<Response> {
   if (!isDriveConnected()) throw new DriveAuthError()

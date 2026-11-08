@@ -30,6 +30,8 @@ interface Props {
   onRetry: () => void
   // 출력 한도에서 잘린 마지막 답변을 이어서 생성한다.
   onContinue: () => void
+  // 코드 실행 결과 파일을 내 드라이브 프로젝트 폴더에 저장(드라이브 방식일 때만). 폴더 주소를 돌려준다.
+  onSaveOutputToDrive?: (fileId: string) => Promise<string>
   isLoading: boolean
   hasApiKey: boolean
   width?: number
@@ -77,8 +79,19 @@ function lastActivity(thinking?: string) {
 }
 
 /** 코드 실행이 만든 파일 목록. 누르면 Files API 로 받아 저장한다(키는 이 브라우저에서만 쓴다). */
-function OutputFiles({ ids }: { ids: string[] }) {
+function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (id: string) => Promise<string> }) {
   const [state, setState] = useState<Record<string, string>>({})
+  const [driveState, setDriveState] = useState<Record<string, string>>({})
+  const toDrive = async (id: string) => {
+    if (!onSaveToDrive) return
+    setDriveState((s) => ({ ...s, [id]: '저장 중…' }))
+    try {
+      const url = await onSaveToDrive(id)
+      setDriveState((s) => ({ ...s, [id]: url }))
+    } catch (e) {
+      setDriveState((s) => ({ ...s, [id]: e instanceof Error ? `!${e.message}` : '!저장하지 못했습니다' }))
+    }
+  }
   const save = async (id: string) => {
     setState((s) => ({ ...s, [id]: '받는 중…' }))
     try {
@@ -102,6 +115,14 @@ function OutputFiles({ ids }: { ids: string[] }) {
               {state[id] && !state[id].endsWith('…') && !state[id].startsWith('Error') ? `${state[id]} 다시 받기` : `파일 ${n + 1} 받기`}
             </button>
             {state[id]?.endsWith('…') && <span className="sources-host">{state[id]}</span>}
+            {onSaveToDrive && (
+              driveState[id]?.startsWith('https://')
+                ? <a className="sources-host" href={driveState[id]} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>드라이브에 저장됨 · 폴더 열기</a>
+                : <button className="sources-host" onClick={() => toDrive(id)} disabled={driveState[id] === '저장 중…'} style={{ textDecoration: 'underline' }}>
+                    {driveState[id] === '저장 중…' ? '저장 중…' : '드라이브에 저장'}
+                  </button>
+            )}
+            {driveState[id]?.startsWith('!') && <span className="sources-host" style={{ color: 'var(--err)' }}>{driveState[id].slice(1)}</span>}
           </li>
         ))}
       </ol>
@@ -109,7 +130,7 @@ function OutputFiles({ ids }: { ids: string[] }) {
   )
 }
 
-export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -406,7 +427,7 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
                       {lastActivity(msg.thinking)}
                     </p>
                   )}
-                  {msg.outputs && msg.outputs.length > 0 && <OutputFiles ids={msg.outputs} />}
+                  {msg.outputs && msg.outputs.length > 0 && <OutputFiles ids={msg.outputs} onSaveToDrive={onSaveOutputToDrive} />}
                   {msg.sources && msg.sources.length > 0 && (
                     <details className="sources" open={msg.sources.some((s) => s.cited)}>
                       <summary>출처 {msg.sources.filter((s) => s.cited).length || msg.sources.length}개{msg.sources.some((s) => s.cited) ? '' : ' (검색한 페이지)'}</summary>

@@ -19,7 +19,9 @@ interface Props {
   onDelete: (id: string) => void
   onClose: () => void
   // 대화를 Google 드라이브에 저장할 때만 넘긴다.
-  drive?: { configured: boolean; connected: boolean; expired: boolean; account?: string; busy: boolean; onConnect: () => void; onDisconnect: () => void }
+  drive?: { configured: boolean; connected: boolean; expired: boolean; account?: string; busy: boolean; onConnect: () => void; onDisconnect: () => void
+    // 프로젝트 파일 자동 저장(내 드라이브 Vibe Coding 폴더)과 지금 대화의 폴더 주소
+    autoSave: boolean; onAutoSave: (on: boolean) => void; folderUrl: string | null }
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -94,6 +96,11 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
               <span className="flex-1 min-w-0" style={{ display: 'flex', flexDirection: 'column' }}>
                 <span>Google 드라이브에 저장 중</span>
                 {drive.account && <span className="truncate" style={{ color: 'var(--txt-3)' }} title={drive.account}>{drive.account}</span>}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, cursor: 'pointer' }} title='답변으로 파일이 바뀔 때마다 내 드라이브 "Vibe Coding/프로젝트" 폴더에 저장'>
+                  <input type="checkbox" checked={drive.autoSave} onChange={(e) => drive.onAutoSave(e.target.checked)} />
+                  프로젝트 파일 드라이브에 저장
+                </label>
+                {drive.folderUrl && <a href={drive.folderUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>이 프로젝트 폴더 열기</a>}
               </span>
               <button onClick={drive.onDisconnect} disabled={drive.busy} style={{ color: 'var(--txt-3)', textDecoration: 'underline', flexShrink: 0 }}>연결 해제</button>
             </>
