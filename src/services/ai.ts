@@ -42,6 +42,8 @@ export interface Message {
   failed?: true
   // 출력 한도(max_tokens)나 컨텍스트 한도에 걸려 잘린 답변. 'output' 이면 '이어서 생성' 버튼을 띄운다.
   truncated?: 'output' | 'context'
+  // 수동 모드에서 코드를 만들기 전에 확인을 받는 답변. 마지막 답변이면 '코딩 진행' 버튼을 띄운다. 화면에만 쓴다.
+  confirm?: true
   // 서버에서 생성 중인 답변의 생성 id. 응답을 다 받으면 빠진다. 남아 있는 채로 대화를 열면 이어 받는다.
   generationId?: string
 }
@@ -149,6 +151,8 @@ export interface StreamHooks {
   appTools?: Record<string, unknown>[]
   // 프로젝트 지침·공유 자료(projectStore.projectContext). 시스템 프롬프트 다음 블록으로 캐시한다.
   projectContext?: string
+  // 코딩 모드: manual 이면 명확한 요청 없이는 파일을 만들지 않고 먼저 확인을 받는다.
+  codeMode?: CodeMode
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -171,6 +175,27 @@ export const MODELS: AIModel[] = [
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
 ]
+
+export type CodeMode = 'auto' | 'manual'
+/** 코딩 모드 표시: 수동 모드에서 모델이 답변 끝에 붙이면 앱이 '코딩 진행' 버튼을 띄운다. */
+export const CONFIRM_TAG = '<VIBE_CONFIRM/>'
+const BUILD_REQUEST_EXAMPLES = '"코딩해", "만들어 줘", "구현해", "수정해", "고쳐 줘", "추가해", "바꿔 줘", "html로 정리해", "페이지로 만들어"'
+const CODE_MODE_RULES: Record<CodeMode, string> = {
+  manual: `# Coding mode: MANUAL (ask before building)
+Output <VIBE_FILE> tags (create or change project files) ONLY when the user's latest message explicitly asks you to build, code, create, modify, fix or convert something into files — e.g. ${BUILD_REQUEST_EXAMPLES} — or starts with "[코딩 진행]".
+For everything else (questions, explanations, reviews, opinions, brainstorming, casual chat) answer in plain Korean text with no VIBE tags, even when the conversation already has project files. Showing a short code snippet in a markdown code block is fine.
+If you think building or changing files would help but the user did not explicitly ask, do NOT build. Briefly describe what you would make (files and approach, a few lines), then end your reply with ${CONFIRM_TAG} on its own line so the app shows a "코딩 진행" button.`,
+  auto: `# Coding mode: AUTO
+Create or change files (<VIBE_FILE> tags) only when the user is asking for something to be built or changed. For questions, explanations, reviews, opinions and casual chat, answer in plain Korean text with no VIBE tags, even when the conversation already has project files.`,
+}
+/** 스트리밍 중·최종 본문에서 확인 표시(끝에 오는 중인 일부 포함)를 숨긴다. */
+export function hideConfirmTag(s: string): string {
+  s = s.replace(/<VIBE_CONFIRM\s*\/?>/g, '')
+  for (let i = Math.min(CONFIRM_TAG.length - 1, s.length); i > 1; i--) {
+    if (CONFIRM_TAG.startsWith(s.slice(-i))) return s.slice(0, -i)
+  }
+  return s
+}
 
 const SYSTEM_PROMPT = `You are Vibe Coding AI — an expert frontend developer and product designer who builds multi-file web projects from natural language.
 
@@ -457,6 +482,7 @@ export async function* streamCode(
     system: [
       { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
       ...(hooks.projectContext ? [{ type: 'text', text: hooks.projectContext, cache_control: { type: 'ephemeral' } }] : []),
+      ...(hooks.codeMode ? [{ type: 'text', text: CODE_MODE_RULES[hooks.codeMode] }] : []),
     ],
     messages: baseMessages,
     // 서버 도구(검색·페치·코드 실행·어드바이저)는 Anthropic 이 실행하고, 앱 도구(메모리·에디터)는 앱이 실행해 결과를 돌려준다.

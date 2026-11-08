@@ -30,8 +30,8 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
-import type { ClientToolResult, MessageDoc, ModelOptions, WebSource } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
@@ -190,6 +190,9 @@ export default function App() {
   const [versionIndex, setVersionIndex] = useState<number | null>(null)
   // 캔버스 ✕ 로 닫았는지. 새 요청·결과물 카드·대화 전환 때 다시 연다.
   const [canvasClosed, setCanvasClosed] = useState(false)
+  // 코딩 모드(입력창 오른쪽 아래). 수동: 명확한 요청 없이는 코드를 만들지 않고 먼저 확인. 브라우저가 기억한다.
+  const [codeMode, setCodeModeState] = useState<CodeMode>(() => { try { return localStorage.getItem('vibe_code_mode') === 'auto' ? 'auto' : 'manual' } catch { return 'manual' } })
+  const setCodeMode = (m: CodeMode) => { setCodeModeState(m); try { localStorage.setItem('vibe_code_mode', m) } catch { /* 무시 */ } }
   const [panelFocus, setPanelFocus] = useState<{ tab: PanelTab; seq: number }>({ tab: 'preview', seq: 0 })
   const focusPanel = (tab: PanelTab) => setPanelFocus((prev) => ({ tab, seq: prev.seq + 1 }))
   const envKey = (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined)?.trim() || ''
@@ -529,6 +532,8 @@ export default function App() {
     projectFilesRef.current = merged
     setProjectFiles(merged)
     setProjectType(pType)
+    // 이번 답변이 실제로 파일을 만들거나 고칠 때만 닫아 둔 미리보기를 연다.
+    setCanvasClosed(false)
   }, [])
 
   const flushPendingRealtimePatch = useCallback(() => {
@@ -637,6 +642,7 @@ export default function App() {
           baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
           projectFilesRef.current = next
           setProjectFiles(next)
+          setCanvasClosed(false)
           unsavedRef.current = true
           return { content: `Copied "${d.name}" into the project folder as ${r.path}; it is now a project file you can edit (the original is untouched).` }
         }
@@ -683,6 +689,7 @@ export default function App() {
         baseProjectRef.current = { files: next, type: base.type }
         projectFilesRef.current = next
         setProjectFiles(next)
+        setCanvasClosed(false)
         editedRef.current.add(changed)
       }
       return result
@@ -757,8 +764,6 @@ export default function App() {
         return
       }
     }
-    // 새 요청의 결과물을 바로 보도록 닫아 둔 캔버스를 다시 연다.
-    setCanvasClosed(false)
     // 이미지만 보내고 글을 비우면 기본 요청을 넣는다. API 는 빈 텍스트 블록을 받지 않는다.
     const userMsg: Message = {
       role: 'user',
@@ -840,6 +845,7 @@ export default function App() {
             onClientTool: runClientTool,
             appTools: APP_TOOLS,
             projectContext: projectContext(projects.find((p) => p.id === chatProjectIdRef.current)),
+            codeMode,
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
@@ -880,7 +886,7 @@ export default function App() {
           // VIBE 태그가 없으면 일반 대화 답변이므로 받은 텍스트를 그대로 보여준다.
           updated[updated.length - 1] = {
             role: 'assistant',
-            content: explanation || (bufferRef.current.includes('<VIBE_') ? '생성 중...' : bufferRef.current),
+            content: explanation || (hideConfirmTag(bufferRef.current).includes('<VIBE_') ? '생성 중...' : hideConfirmTag(bufferRef.current)),
             files: {},
             ...(thinkingRef.current ? { thinking: thinkingRef.current } : {}),
           }
@@ -963,15 +969,19 @@ export default function App() {
         : truncated === 'context'
           ? '⚠️ 대화가 모델의 컨텍스트 한도를 가득 채워 응답이 잘렸습니다. 새 대화에서 이어 가세요.'
           : ''
-      const body = explanation || (bufferRef.current.includes('<VIBE_')
+      // 수동 모드에서 모델이 '코딩 진행' 확인을 요청했는지(파일을 만들지 않은 답변에서만)
+      const askConfirm = bufferRef.current.includes('<VIBE_CONFIRM') && !bufferRef.current.includes('<VIBE_FILE')
+      const plain = hideConfirmTag(bufferRef.current)
+      const body = explanation || (plain.includes('<VIBE_')
         ? (truncated ? '' : '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.')
-        : bufferRef.current.trim())
+        : plain.trim())
       setMessages((prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = {
           role: 'assistant',
           content: [body, truncatedNote].filter(Boolean).join('\n\n'),
           ...(truncated ? { truncated } : {}),
+          ...(askConfirm && !truncated ? { confirm: true as const } : {}),
           // 인용된 출처를 앞에, 최대 10개
           ...(sourcesRef.current.size ? { sources: [...sourcesRef.current.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
           ...(outputFilesRef.current.length ? { outputs: [...outputFilesRef.current] } : {}),
@@ -1254,6 +1264,8 @@ export default function App() {
             messages={messages}
             onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
             attachError={attachError}
+            codeMode={codeMode}
+            onCodeModeChange={setCodeMode}
             projectName={currentProject?.name}
             onOpenProject={() => currentProject && setProjectModal(currentProject)}
             onStop={handleStop}

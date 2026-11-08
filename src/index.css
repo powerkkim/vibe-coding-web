@@ -707,3 +707,14 @@
 
 .project-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 0; }
 .project-badge { font-size: var(--fs-xs); font-weight: 600; color: var(--txt); padding: 2px 8px; border-radius: 999px; background: var(--bg-hover); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+
+/* 코딩 모드 선택 (입력창 오른쪽 아래) */
+.code-mode-btn { height: 28px; padding: 0 10px; border-radius: 8px; font-size: var(--fs-xs); font-weight: 600; color: var(--txt-2, var(--txt)); background: var(--bg-hover); border: none; cursor: pointer; }
+.code-mode-btn:hover { color: var(--txt); }
+.code-mode-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 40; width: 290px; padding: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.18); display: flex; flex-direction: column; }
+.code-mode-title { font-size: var(--fs-xs); color: var(--txt-3); padding: 6px 10px 4px; }
+.code-mode-item { display: flex; align-items: center; gap: 10px; text-align: left; padding: 8px 10px; border-radius: 8px; background: none; border: none; cursor: pointer; color: var(--txt); }
+.code-mode-item:hover { background: var(--bg-hover); }
+.code-mode-label { display: block; font-size: var(--fs-sm); font-weight: 600; }
+.code-mode-desc { display: block; margin-top: 2px; font-size: var(--fs-xs); line-height: 1.45; color: var(--txt-3); }
