@@ -15,7 +15,7 @@ import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
-import { exportProject, FileScopeError, listFolder, saveToProject } from './services/driveExport'
+import { exportProject, FileScopeError, importPicked, isPickerConfigured, listFolder, pickDriveFile, readFromProject, saveToProject } from './services/driveExport'
 import { downloadOutputFile } from './services/ai'
 import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
@@ -118,8 +118,8 @@ const APP_TOOLS: Record<string, unknown>[] = [
     input_schema: {
       type: 'object',
       properties: {
-        command: { type: 'string', enum: ['save_project', 'save_text', 'save_outputs', 'list'], description: 'save_project: save all current project files now; save_text: save `content` as file `path`; save_outputs: save files produced by code execution in this chat; list: list the project folder (or the Vibe Coding root when scope is "root")' },
-        path: { type: 'string', description: 'File path for save_text, e.g. "report.md" or "docs/notes.txt"' },
+        command: { type: 'string', enum: ['save_project', 'save_text', 'save_outputs', 'list', 'read', 'pick'], description: 'save_project: save all current project files now; save_text: save `content` as file `path`; save_outputs: save files produced by code execution in this chat; list: list the project folder (or the Vibe Coding root when scope is "root"); read: read file `path` from the project folder; pick: open the Google file picker so the user can choose an existing Drive file, which is COPIED into the project folder (imports/) and, if text, added to the project files for editing (the original is never modified)' },
+        path: { type: 'string', description: 'File path for save_text/read, e.g. "report.md" or "imports/notes.txt"' },
         content: { type: 'string', description: 'Text content for save_text' },
         scope: { type: 'string', enum: ['project', 'root'], description: 'For list' },
       },
@@ -510,6 +510,40 @@ export default function App() {
   const outputFilesRef = useRef<string[]>([])
   // 텍스트 에디터로 이번 턴에 바뀐 파일
   const editedRef = useRef(new Set<string>())
+  const [importNotice, setImportNotice] = useState('')
+  /**
+   * 드라이브 파일 가져오기(A안): 선택창에서 고른 파일을 프로젝트 폴더 imports/ 로 복사하고,
+   * 텍스트 파일이면 프로젝트 파일에도 넣는다 → Claude 가 읽고 고칠 수 있고, 고친 내용은 자동 저장으로 사본에 저장된다. 원본은 그대로.
+   */
+  const importFromDrive = async (): Promise<string> => {
+    if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
+    if (!hasFileScope()) { setDriveModal('scope'); throw new Error('드라이브 파일 권한 추가가 필요해요') }
+    const picked = await pickDriveFile()
+    if (!picked) return 'The user cancelled the file picker.'
+    const id = genChatIdRef.current ?? chatId ?? crypto.randomUUID()
+    if (!chatId && !genChatIdRef.current) { genChatIdRef.current = id; setChatId(id); chatCreatedAtRef.current = Date.now() }
+    const title = messages.length ? chatTitle(messages) : picked.name
+    const r = await importPicked(id, title, picked)
+    if (r.text !== undefined) {
+      const next = { ...projectFilesRef.current, [r.path]: r.text }
+      baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
+      projectFilesRef.current = next
+      setProjectFiles(next)
+      unsavedRef.current = true
+    }
+    const msg = r.text !== undefined
+      ? `"${r.source}"을(를) 프로젝트 폴더에 ${r.path} 로 복사했어요. 원본은 그대로이고, 이 사본을 고쳐서 저장합니다.`
+      : `"${r.source}"을(를) ${r.path} 로 복사했어요(${Math.round(r.size / 1024)}KB). 텍스트가 아니거나 커서 대화에는 넣지 않았어요.`
+    setImportNotice(msg)
+    return r.text !== undefined
+      ? `Copied "${r.source}" into the project folder as ${r.path}; it is now one of the current project files (edit that path; the original stays untouched).`
+      : `Copied "${r.source}" into the project folder as ${r.path} (${r.size} bytes). It is binary or too large, so its content was not added to the conversation.`
+  }
+  const handleImportClick = () => {
+    setImportNotice('')
+    importFromDrive().catch((e) => setImportNotice(e instanceof Error ? e.message : '가져오지 못했습니다'))
+  }
+
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
   const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
     if (name === 'memory') return runMemoryCommand(input)
@@ -528,6 +562,16 @@ export default function App() {
       if (cmd === 'list') {
         const r = await listFolder(input.scope === 'root' ? undefined : id, title)
         return { content: `${r.url}\n${r.items.join('\n') || '(empty)'}` }
+      }
+      if (cmd === 'read') {
+        const path = String(input.path ?? '').trim()
+        if (!path) return { content: 'path is required', isError: true }
+        const text = await readFromProject(id, title, path)
+        return { content: text.length > 30_000 ? `${text.slice(0, 30_000)}\n... (truncated)` : text }
+      }
+      if (cmd === 'pick') {
+        if (!isPickerConfigured()) return { content: 'The Google file picker is not configured in this deployment.', isError: true }
+        return { content: await importFromDrive() }
       }
       if (cmd === 'save_project') {
         const r = await exportProject(id, title, projectFilesRef.current)
@@ -1117,6 +1161,8 @@ export default function App() {
             onStop={handleStop}
             onRetry={handleRetry}
             onContinue={handleContinue}
+            onImportFromDrive={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? handleImportClick : undefined}
+            importNotice={importNotice}
             onSaveOutputToDrive={USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
               if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
               if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }

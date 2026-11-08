@@ -86,6 +86,8 @@ export function isDriveConnected() { return !!saved && saved.expiresAt > Date.no
 /** 연결했던 적이 있는데 토큰이 만료된 상태. 화면에 '다시 연결'을 띄운다. */
 export function isDriveExpired() { return !!account && !isDriveConnected() }
 export function driveAccount() { return account }
+/** Google 선택창(Picker)에 넘길 현재 토큰. 연결 안 됐으면 null */
+export function currentAccessToken() { return isDriveConnected() ? saved!.token : null }
 /** 지금 토큰에 drive.file(내 드라이브에 보이는 파일 저장) 권한이 있는가 */
 export function hasFileScope() { return isDriveConnected() && !!saved?.scope?.includes(SCOPE_FILE) }
 /** 토큰 남은 시간(분). 연결 안 됐으면 null */

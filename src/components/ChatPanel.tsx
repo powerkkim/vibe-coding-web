@@ -4,6 +4,7 @@ import AnswerView from './AnswerView'
 import type { Message, MessageImage, TokenUsage } from '../services/ai'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
 import { formatUsd, remainingBalance } from '../services/usage'
+import { GoogleDrive } from '../icons'
 import { downloadOutputFile } from '../services/ai'
 import type { Balance } from '../services/usage'
 import type { UsageTotals } from '../services/usage'
@@ -32,6 +33,9 @@ interface Props {
   onContinue: () => void
   // 코드 실행 결과 파일을 내 드라이브 프로젝트 폴더에 저장(드라이브 방식일 때만). 폴더 주소를 돌려준다.
   onSaveOutputToDrive?: (fileId: string) => Promise<string>
+  // 드라이브에서 파일 가져오기(선택창 → 프로젝트 폴더로 복사). 설정이 없으면 버튼을 숨긴다.
+  onImportFromDrive?: () => void
+  importNotice?: string
   isLoading: boolean
   hasApiKey: boolean
   width?: number
@@ -130,7 +134,7 @@ function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (i
   )
 }
 
-export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onImportFromDrive, importNotice, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -219,6 +223,9 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
         {imageError && (
           <p role="alert" style={{ color: 'var(--err)', fontSize: 'var(--fs-xs)', margin: '0 4px 6px' }}>{imageError}</p>
         )}
+        {importNotice && (
+          <p role="status" style={{ color: 'var(--txt-2)', fontSize: 'var(--fs-xs)', margin: '0 4px 6px' }}>{importNotice}</p>
+        )}
         {/* 화면에는 보이지 않고, 생성 시작·끝을 스크린리더에 알린다. */}
         <span className="sr-only" aria-live="polite">
           {isLoading ? '응답을 생성하고 있습니다' : messages.length > 0 ? '응답이 끝났습니다' : ''}
@@ -266,6 +273,11 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
           />
           <div className="flex items-center justify-between px-3 pb-2.5">
             <span className="flex items-center gap-2">
+              {onImportFromDrive && (
+                <button onClick={onImportFromDrive} disabled={!hasApiKey} aria-label="드라이브에서 파일 가져오기 (프로젝트 폴더로 복사)" className="icon-btn tip-up">
+                  <GoogleDrive style={{ width: 16, height: 16 }} />
+                </button>
+              )}
               <button onClick={() => fileInputRef.current?.click()}
                 disabled={!hasApiKey || images.length >= MAX_IMAGES_PER_MESSAGE}
                 aria-label="이미지 추가 (붙여넣기·끌어다 놓기도 됩니다)"
