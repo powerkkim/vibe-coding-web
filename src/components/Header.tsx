@@ -66,7 +66,6 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
           </button>
         )}
           {!isMobile && <img src={logo} alt="Vibe Coding" width={28} height={28} style={{ marginLeft: 8 }} />}
-          <span title="앱 버전" style={{ fontSize: 11, color: 'var(--txt-3)', marginLeft: 6, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>v{__APP_VERSION__}</span>
           <div className="relative flex items-center min-w-0">
             <select
               value={model}
