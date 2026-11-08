@@ -37,9 +37,6 @@ jobs:
           # 비워 두면 Cloudflare 없이 동작한다(대화 저장 = Google 드라이브, 생성 = 브라우저에서 Anthropic 직접 호출).
           VITE_CHAT_SERVER_URL: ${{ vars.CHAT_SERVER_URL }}
           VITE_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          # Google 선택창(드라이브 파일 가져오기). 없으면 가져오기 기능만 숨겨진다.
-          VITE_GOOGLE_API_KEY: ${{ vars.GOOGLE_API_KEY }}
-          VITE_GOOGLE_APP_ID: ${{ vars.GOOGLE_APP_ID }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

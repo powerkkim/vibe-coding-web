@@ -5,7 +5,9 @@
  * 범위
  * - drive.appdata: 대화·메모리 저장용 숨김 폴더(appDataFolder). 사용자 눈에 안 보인다.
  * - drive.file: 앱이 만든 파일·폴더만 '내 드라이브'에 보이게 만들고 고칠 수 있다(프로젝트 파일 내보내기, driveExport.ts).
- *   사용자의 다른 드라이브 파일은 둘 다 보지 못한다. 둘 다 Google 기준 비민감 범위라 별도 심사가 없다.
+ * - drive.readonly: 드라이브 전체 검색·읽기(쓰기는 못 함). Google '제한' 범위라 앱을 '테스트' 상태로 두고
+ *   테스트 사용자(최대 100명)만 쓴다. 테스트 상태에서는 동의가 7일마다 만료되어 '권한 추가'를 다시 눌러야 한다.
+ * 쓰기는 drive.file 범위(Vibe Coding 폴더)에서만 한다. 기존 파일은 읽어서 프로젝트 폴더로 복사한 뒤 사본을 고친다(A안).
  * 대화 1건 = appDataFolder 안의 chat-<id>.json 파일 1개. 목록용 제목·수정 시각은 appProperties 에 둬서 본문을 열지 않는다.
  *
  * 필요한 설정: VITE_GOOGLE_CLIENT_ID (Google Cloud 콘솔 → OAuth 클라이언트 ID, 웹 애플리케이션).
@@ -16,9 +18,11 @@ export const GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string
 
 const SCOPE_APPDATA = 'https://www.googleapis.com/auth/drive.appdata'
 const SCOPE_FILE = 'https://www.googleapis.com/auth/drive.file'
-// drive.file 을 한 번 허용받았으면 이후 재로그인에도 함께 요청한다(이미 동의했으므로 동의 화면 없이 지나간다).
+const SCOPE_READ = 'https://www.googleapis.com/auth/drive.readonly'
+// 확장 권한(drive.file + drive.readonly)을 허용받았으면 이후 재로그인에도 함께 요청한다(동의 화면 없이 지나간다).
+// 값 '2' = 두 권한 모두. 예전 값 '1'(drive.file 만)은 다시 '권한 추가'를 거친다.
 const FILE_SCOPE_KEY = 'vibe_gdrive_file_scope'
-const fileScopeConsented = () => { try { return localStorage.getItem(FILE_SCOPE_KEY) === '1' } catch { return false } }
+const fileScopeConsented = () => { try { return localStorage.getItem(FILE_SCOPE_KEY) === '2' } catch { return false } }
 const TOKEN_KEY = 'vibe_gdrive_token'
 // 연결했던 Google 계정. 토큰이 만료돼도 남겨 두고, 다시 연결할 때 같은 계정으로 계정 선택 없이 바로 붙인다.
 // '연결 해제'를 눌렀을 때만 지운다.
@@ -86,10 +90,10 @@ export function isDriveConnected() { return !!saved && saved.expiresAt > Date.no
 /** 연결했던 적이 있는데 토큰이 만료된 상태. 화면에 '다시 연결'을 띄운다. */
 export function isDriveExpired() { return !!account && !isDriveConnected() }
 export function driveAccount() { return account }
-/** Google 선택창(Picker)에 넘길 현재 토큰. 연결 안 됐으면 null */
-export function currentAccessToken() { return isDriveConnected() ? saved!.token : null }
 /** 지금 토큰에 drive.file(내 드라이브에 보이는 파일 저장) 권한이 있는가 */
 export function hasFileScope() { return isDriveConnected() && !!saved?.scope?.includes(SCOPE_FILE) }
+/** 지금 토큰에 drive.readonly(드라이브 전체 검색·읽기) 권한이 있는가 */
+export function hasReadScope() { return isDriveConnected() && !!saved?.scope?.includes(SCOPE_READ) }
 /** 토큰 남은 시간(분). 연결 안 됐으면 null */
 export function driveMinutesLeft() { return saved ? Math.max(0, Math.round((saved.expiresAt - Date.now()) / 60_000)) : null }
 export function onDriveChange(fn: (connected: boolean) => void) { listeners.add(fn); return () => { listeners.delete(fn) } }
@@ -122,7 +126,11 @@ function onToken(r: TokenResponse) {
   waiting = null
   if (!r.access_token) return w?.reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
   const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000, scope: r.scope }
-  if (r.scope?.includes(SCOPE_FILE)) { try { localStorage.setItem(FILE_SCOPE_KEY, '1') } catch { /* 무시 */ } }
+  // 확장 권한 동의 여부를 기억한다. 7일 만료 등으로 빠지면 지워서 다음엔 '권한 추가'로 다시 묻는다.
+  try {
+    if (r.scope?.includes(SCOPE_FILE) && r.scope.includes(SCOPE_READ)) localStorage.setItem(FILE_SCOPE_KEY, '2')
+    else if (r.scope) localStorage.removeItem(FILE_SCOPE_KEY)
+  } catch { /* 무시 */ }
   // 어느 계정에 붙었는지 확인해 기억한다(목록 표시·다음 재연결의 login_hint). 실패해도 연결은 유지한다.
   fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
     .then((res) => (res.ok ? res.json() : null))
@@ -139,7 +147,7 @@ function onToken(r: TokenResponse) {
  */
 function ensureClient(withFiles = !account || fileScopeConsented()): TokenClient | null {
   if (!window.google?.accounts?.oauth2 || !GOOGLE_CLIENT_ID) return null
-  const scope = withFiles ? `${SCOPE_APPDATA} ${SCOPE_FILE}` : SCOPE_APPDATA
+  const scope = withFiles ? `${SCOPE_APPDATA} ${SCOPE_FILE} ${SCOPE_READ}` : SCOPE_APPDATA
   if (!client || clientHint !== account?.email || clientScope !== scope) {
     clientHint = account?.email
     clientScope = scope
@@ -189,7 +197,7 @@ export async function connectDrive(opts: { withFiles?: boolean } = {}): Promise<
   // 권한 추가는 동의 화면이 필요하다. 그 외에는 기억한 계정으로 조용히.
   const upgrading = withFiles && !!account && !fileScopeConsented()
   await requestToken(c, upgrading ? 'consent' : account ? '' : 'select_account')
-  if (withFiles && !hasFileScope()) throw new Error('드라이브 파일 저장 권한이 허용되지 않았습니다')
+  if (withFiles && !(hasFileScope() && hasReadScope())) throw new Error('드라이브 권한이 모두 허용되지 않았습니다(동의 화면에서 모든 항목을 체크해 주세요)')
 }
 
 // ── 살며시 재로그인 ──────────────────────────────────────────
