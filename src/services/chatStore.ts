@@ -1,6 +1,6 @@
 import type { Message } from './ai'
-import { DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
-import { backupDelete, backupGet, backupGetAll, backupPut, localDelete, localGet, localGetAll, localPut } from './localStore'
+import { driveAccount, DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
+import { backupForget, backupGet, backupGetAll, backupPut, localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
  * 대화 저장소
@@ -122,15 +122,17 @@ async function driveSave(chat: StoredChat) {
 
 /** 브라우저에 대기 중인 대화를 드라이브로 올린다. 드라이브 쪽이 더 최신이면 올리지 않고 브라우저 사본만 지운다. */
 async function syncPending(remote: ChatSummary[]): Promise<ChatSummary[]> {
-  const pending = await localGetAll<StoredChat>()
+  // 다른 계정으로 연결했을 때 쌓인 대기본은 건드리지 않는다(그 계정으로 다시 연결하면 올라간다).
+  const pending = (await localGetAll<LocalCopy>()).filter(sameAccount)
   if (pending.length === 0) return remote
   const remoteById = new Map(remote.map((c) => [c.id, c]))
-  for (const chat of pending) {
+  for (const { synced: _s, account: _a, ...chat } of pending) {
     const r = remoteById.get(chat.id)
     if (!r || chat.updatedAt > r.updatedAt) {
       await driveSave(chat)
       remoteById.set(chat.id, { id: chat.id, title: chat.title, updatedAt: chat.updatedAt })
     }
+    await backupChat(chat, true)
     await localDelete(chat.id)
   }
   const list = [...remoteById.values()].sort(byRecent)
@@ -139,20 +141,25 @@ async function syncPending(remote: ChatSummary[]): Promise<ChatSummary[]> {
 }
 
 /**
- * 백업 복구: 최근 대화 백업이 드라이브보다 최신이면(드라이브 저장이 빠졌거나 생성 도중 브라우저가 닫힘) 드라이브로 다시 올린다.
- * 드라이브 쪽이 더 최신이면(다른 기기에서 이어서 씀) 드라이브를 그대로 둔다.
+ * 백업 복구: 드라이브에 올라가지 못한 백업(synced=false: 생성 도중 브라우저가 닫힘, 저장 직후 탭 종료 등)만 다시 올린다.
+ * 이미 올라간 백업은 드라이브가 기준이다. 드라이브에 없으면 다른 기기에서 지운 것이므로 백업도 지운다.
+ * 다른 계정에서 만든 백업은 건드리지 않는다.
  */
 async function recoverFromBackup(remote: ChatSummary[]): Promise<ChatSummary[]> {
-  const backups = await backupGetAll<StoredChat>().catch(() => [] as StoredChat[])
+  const backups = (await backupGetAll<LocalCopy>().catch(() => [] as LocalCopy[])).filter(sameAccount)
   if (!backups.length) return remote
   const byId = new Map(remote.map((c) => [c.id, c]))
   let changed = false
-  for (const b of backups) {
+  for (const { synced, account: _a, ...b } of backups) {
     const r = byId.get(b.id)
-    if (r && r.updatedAt >= b.updatedAt) continue
+    if (synced) {
+      if (!r) await backupForget(b.id).catch(() => {})
+      continue
+    }
     try {
       await driveSave(b)
-      byId.set(b.id, { id: b.id, title: b.title, updatedAt: b.updatedAt })
+      await backupChat(b, true)
+      byId.set(b.id, { id: b.id, title: b.title, updatedAt: Math.max(b.updatedAt, r?.updatedAt ?? 0) })
       changed = true
     } catch { /* 다음에 다시 시도 */ }
   }
@@ -167,10 +174,10 @@ export async function listChats(apiKey: string): Promise<ChatListItem[]> {
   if (USE_DRIVE) {
     if (!usingLocal()) return recoverFromBackup(await syncPending(await driveList()))
     // 연결 전·만료: 대기 중(브라우저) + 마지막으로 본 드라이브 목록
-    const pending = (await localGetAll<StoredChat>()).map(({ id, title, updatedAt }) => ({ id, title, updatedAt, pending: true }))
+    const pending = (await localGetAll<LocalCopy>()).filter(sameAccount).map(({ id, title, updatedAt }) => ({ id, title, updatedAt, pending: true }))
     const ids = new Set(pending.map((c) => c.id))
     // 백업에 있는 대화는 연결 없이도 열 수 있으므로 '드라이브에만 있음'으로 흐리게 두지 않는다.
-    const backups = await backupGetAll<StoredChat>().catch(() => [] as StoredChat[])
+    const backups = (await backupGetAll<LocalCopy>().catch(() => [] as LocalCopy[])).filter(sameAccount)
     const backed = new Map(backups.map((b) => [b.id, b]))
     const cached = readListCache().filter((c) => !ids.has(c.id)).map((c) => {
       const b = backed.get(c.id)
@@ -187,7 +194,8 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
   if (USE_DRIVE) {
     // 클릭과 동시에 살며시 재로그인이 시작됐을 수 있다. 끝나길 기다렸다가 연결 상태로 연다.
     await waitForRenewal()
-    const backup = await backupGet<StoredChat>(id).catch(() => undefined)
+    const raw = await backupGet<LocalCopy>(id).catch(() => undefined)
+    const backup = raw && sameAccount(raw) ? raw : undefined
     const local = await localGet<StoredChat>(id)
     if (local || usingLocal()) {
       const best = newest(local, backup)
@@ -205,10 +213,12 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
       if (backup) return backup
       throw e
     }
-    const best = newest(remote, backup)
-    // 백업이 더 최신이면 드라이브에 빠진 내용이 있는 것 → 다시 올린다.
-    if (best && best === backup && backup !== remote) driveSave(backup).catch(() => {})
-    return best
+    // 올라가지 못한 백업만 드라이브보다 우선한다(올라간 백업은 드라이브가 기준).
+    if (backup && !backup.synced && (!remote || backup.updatedAt > remote.updatedAt)) {
+      driveSave(backup).then(() => backupChat(backup, true)).catch(() => {})
+      return backup
+    }
+    return remote ?? backup
   }
   const res = await request(apiKey, `/chats/${encodeURIComponent(id)}`)
   return res.status === 404 ? undefined : res.json()
@@ -219,25 +229,39 @@ export async function loadChat(apiKey: string, id: string): Promise<StoredChat |
  * 드라이브 저장이 실패하면(턴 도중 토큰 만료로 401, 네트워크 오류 등) 버리지 않고 브라우저에 대기 저장한다.
  * 예전엔 이 경우 저장이 실패한 채 다시 시도하지 않아, 그 턴 내용이 어디에도 남지 않을 수 있었다.
  */
+/**
+ * 브라우저 사본(대기·백업) 표시.
+ * synced: 드라이브에 이 내용이 올라갔음 → 복구 때 다시 올리지 않는다(다른 기기에서 지운 대화가 되살아나거나, 기기 시계 차이로
+ *         오래된 사본이 새 내용을 덮는 것을 막는다). 올라가지 못한 사본(synced=false)만 복구 대상이다.
+ * account: 만들 때 연결돼 있던(또는 마지막으로 연결했던) Google 계정. 다른 계정의 드라이브로 올리지 않는다.
+ */
+type LocalCopy = StoredChat & { synced?: boolean; account?: string }
+const currentAccount = () => driveAccount()?.email
+/** 이 사본을 지금 계정에 올려도 되는가: 계정 없이 만든 것(처음 연결 전)이거나 같은 계정 */
+const sameAccount = (c: LocalCopy) => !c.account || c.account === currentAccount()
+
 const newest = (a?: StoredChat, b?: StoredChat) => (!a ? b : !b ? a : b.updatedAt > a.updatedAt ? b : a)
 
 /** 최근 대화 백업에만 쓴다(드라이브·대기 저장과 별개). 생성 도중 받은 부분을 몇 초마다 남길 때 쓴다. */
-export function backupChat(chat: StoredChat) {
-  return backupPut(chat).catch(() => {})
+export function backupChat(chat: StoredChat, synced = false) {
+  const copy: LocalCopy = { ...chat, synced, account: currentAccount() }
+  return backupPut(copy).catch(() => {})
 }
 
 export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive' | 'local' | 'server'> {
-  // 어디에 저장하든 먼저 이 브라우저의 최근 대화 백업에 남긴다(가장 빠르고 실패할 일이 적다).
+  // 어디에 저장하든 먼저 이 브라우저의 최근 대화 백업에 남긴다(가장 빠르고 실패할 일이 적다). 올라가면 synced 로 바꾼다.
   await backupChat(chat)
   if (USE_DRIVE) {
     await waitForRenewal()
-    if (usingLocal()) { await localPut(chat); return 'local' }
+    const pending: LocalCopy = { ...chat, account: currentAccount() }
+    if (usingLocal()) { await localPut(pending); return 'local' }
     try {
       await driveSave(chat)
+      await backupChat(chat, true)
       await localDelete(chat.id)   // 예전 대기본이 있으면 정리
       return 'drive'
     } catch {
-      await localPut(chat)
+      await localPut(pending)
       return 'local'
     }
   }
@@ -253,14 +277,14 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive
 /** 탭을 닫는 순간 저장되지 않은 대화를 브라우저에 대기 저장한다(드라이브 요청은 닫히면서 끊길 수 있어서). 다음 실행 때 드라이브로 올라간다. */
 export function savePendingNow(chat: StoredChat) {
   backupChat(chat)
-  if (USE_DRIVE) localPut(chat).catch(() => {})
+  if (USE_DRIVE) localPut({ ...chat, account: currentAccount() } as LocalCopy).catch(() => {})
 }
 
 export async function deleteChat(apiKey: string, id: string): Promise<void> {
   if (USE_DRIVE) {
     await waitForRenewal()
     await localDelete(id)
-    await backupDelete(id).catch(() => {})
+    await backupForget(id).catch(() => {})
     if (usingLocal()) {
       if (readListCache().some((c) => c.id === id)) throw new DriveAuthError()
       return

@@ -131,9 +131,22 @@ export default function App() {
   // 요청 1건이 끝날 때마다 호출된다. 화면의 '이번' 값을 바꾸고 오늘·누적 합계에 더한다.
   const [balance, setBalanceState] = useState<Balance | null>(() => loadBalance())
   const handleBalanceChange = (amount: number | null) => setBalanceState(setBalance(amount))
+  // 한 턴(질문 1개)이 도구 왕복으로 요청 여러 번이 될 수 있어, '이번' 표시는 턴 안에서 합산한다. 누적·잔액은 요청마다 더한다.
+  const turnUsageRef = useRef<{ usage: TokenUsage; cost: number } | null>(null)
   const recordUsage = (usage: TokenUsage) => {
-    setTokenUsage(usage)
-    setLastCost(estimateCost(activeModel, usage))
+    const cost = estimateCost(activeModel, usage)
+    const prev = turnUsageRef.current
+    const sum: TokenUsage = prev ? {
+      ...usage,
+      promptTokens: prev.usage.promptTokens + usage.promptTokens,
+      cacheWriteTokens: prev.usage.cacheWriteTokens + usage.cacheWriteTokens,
+      cacheReadTokens: prev.usage.cacheReadTokens + usage.cacheReadTokens,
+      completionTokens: prev.usage.completionTokens + usage.completionTokens,
+      totalTokens: prev.usage.totalTokens + usage.totalTokens,
+    } : usage
+    turnUsageRef.current = { usage: sum, cost: (prev?.cost ?? 0) + cost }
+    setTokenUsage(sum)
+    setLastCost(turnUsageRef.current.cost)
     setUsageTotals(addUsage(activeModel, usage))
     setBalanceState(loadBalance())
   }
@@ -482,8 +495,12 @@ export default function App() {
   // 끼어들어 말하기: 생성 중에 보내면 지금 답변을 멈추고(받은 부분은 남김) 멈춤 처리가 끝난 뒤 새 메시지를 보낸다.
   const interruptRef = useRef<{ prompt: string; images: MessageImage[] } | null>(null)
   const handleInterrupt = (prompt: string, images: MessageImage[] = []) => {
-    interruptRef.current = { prompt, images }
-    handleStop()
+    // 멈춤 처리가 끝나기 전에 또 보내면 덮어쓰지 않고 이어 붙인다.
+    const prev = interruptRef.current
+    interruptRef.current = prev
+      ? { prompt: [prev.prompt, prompt].filter(Boolean).join('\n\n'), images: [...prev.images, ...images] }
+      : { prompt, images }
+    if (!prev) handleStop()
   }
   useEffect(() => {
     if (isLoading || !interruptRef.current) return
@@ -528,6 +545,7 @@ export default function App() {
     bufferRef.current = ''
     thinkingRef.current = ''
     sourcesRef.current = new Map()
+    turnUsageRef.current = null
     outputFilesRef.current = []
     editedRef.current = new Set()
     lastRealtimePatchRef.current = ''
@@ -850,6 +868,7 @@ export default function App() {
       // 생성 도중 닫힌 대화면 서버에 남은 생성을 이어 받는다.
       const last = chat.messages[chat.messages.length - 1]
       if (last?.role === 'assistant' && last.generationId) {
+        genChatIdRef.current = chat.id   // 이어 받는 동안의 부분 백업이 이 대화 id 로 기록되도록
         runGeneration(chat.messages.slice(0, -1), last.generationId, { files: chat.projectFiles, type: chat.projectType }, true)
       }
     } catch (e) {

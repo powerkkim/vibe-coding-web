@@ -1,4 +1,4 @@
-import { isDriveConnected, listFiles, readFile, writeFile } from './drive'
+import { driveAccount, isDriveConnected, listFiles, readFile, writeFile } from './drive'
 import type { ClientToolResult } from './ai'
 
 /**
@@ -19,14 +19,20 @@ const DRIVE_NAME = 'memory.json'
 function readLocal(): MemoryFiles {
   try { return JSON.parse(localStorage.getItem(LOCAL_KEY) ?? '{}') ?? {} } catch { return {} }
 }
+// 대기 중 변경에는 그때의 계정을 적어 두고, 같은 계정(또는 계정 없이 만든 것)일 때만 드라이브에 합친다.
 function writeLocal(files: MemoryFiles, dirty: boolean) {
   try {
     localStorage.setItem(LOCAL_KEY, JSON.stringify(files))
-    if (dirty) localStorage.setItem(DIRTY_KEY, '1')
+    if (dirty) localStorage.setItem(DIRTY_KEY, driveAccount()?.email ?? '*')
     else localStorage.removeItem(DIRTY_KEY)
   } catch { /* 저장 불가 브라우저: 이번 세션만 */ }
 }
-const isDirty = () => { try { return localStorage.getItem(DIRTY_KEY) === '1' } catch { return false } }
+const isDirty = () => {
+  try {
+    const v = localStorage.getItem(DIRTY_KEY)
+    return !!v && (v === '*' || v === '1' || v === driveAccount()?.email)
+  } catch { return false }
+}
 
 async function driveFile() {
   return (await listFiles(DRIVE_NAME)).find((f) => f.name === DRIVE_NAME)

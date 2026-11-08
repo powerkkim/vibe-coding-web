@@ -44,11 +44,29 @@ export const BACKUP_LIMIT = 10
 export const backupGetAll = <T>() => run<T[]>('readonly', (s) => s.getAll() as IDBRequest<T[]>, BACKUP)
 export const backupGet = <T>(id: string) => run<T | undefined>('readonly', (s) => s.get(id) as IDBRequest<T | undefined>, BACKUP)
 export const backupDelete = (id: string) => run('readwrite', (s) => s.delete(id), BACKUP).then(() => {})
-/** 백업에 넣고, 최근 수정 순으로 BACKUP_LIMIT 개만 남긴다. */
+/**
+ * 백업에 넣고, 최근 수정 순으로 BACKUP_LIMIT 개만 남긴다.
+ * 정리는 새 대화가 들어올 때만 한다(생성 중 4초마다 같은 대화를 다시 쓸 때 전체를 읽지 않도록 작은 색인을 따로 둔다).
+ */
+const INDEX_KEY = 'vibe_backup_index'
+function readIndex(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(INDEX_KEY) ?? '{}') ?? {} } catch { return {} }
+}
+function writeIndex(idx: Record<string, number>) {
+  try { localStorage.setItem(INDEX_KEY, JSON.stringify(idx)) } catch { /* 무시 */ }
+}
 export async function backupPut(value: { id: string; updatedAt: number }) {
   await run('readwrite', (s) => s.put(value), BACKUP)
-  const all = await backupGetAll<{ id: string; updatedAt: number }>()
-  if (all.length <= BACKUP_LIMIT) return
-  const old = all.sort((a, b) => b.updatedAt - a.updatedAt).slice(BACKUP_LIMIT)
-  for (const o of old) await backupDelete(o.id)
+  const idx = readIndex()
+  const isNew = !(value.id in idx)
+  idx[value.id] = value.updatedAt
+  if (isNew && Object.keys(idx).length > BACKUP_LIMIT) {
+    const old = Object.entries(idx).sort((a, b) => b[1] - a[1]).slice(BACKUP_LIMIT)
+    for (const [id] of old) { await backupDelete(id); delete idx[id] }
+  }
+  writeIndex(idx)
+}
+export async function backupForget(id: string) {
+  await backupDelete(id)
+  const idx = readIndex(); delete idx[id]; writeIndex(idx)
 }
