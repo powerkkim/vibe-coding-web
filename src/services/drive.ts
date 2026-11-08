@@ -79,8 +79,6 @@ export function isDriveConnected() { return !!saved && saved.expiresAt > Date.no
 /** 연결했던 적이 있는데 토큰이 만료된 상태. 화면에 '다시 연결'을 띄운다. */
 export function isDriveExpired() { return !!account && !isDriveConnected() }
 export function driveAccount() { return account }
-/** 토큰 남은 시간(분). 연결 안 됐으면 null */
-export function driveMinutesLeft() { return saved ? Math.max(0, Math.round((saved.expiresAt - Date.now()) / 60_000)) : null }
 export function onDriveChange(fn: (connected: boolean) => void) { listeners.add(fn); return () => { listeners.delete(fn) } }
 
 let gisLoading: Promise<void> | null = null

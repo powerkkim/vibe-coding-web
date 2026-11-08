@@ -13,7 +13,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
+import { backupChat, chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
@@ -578,10 +578,6 @@ export default function App() {
     const controller = new AbortController()
     abortRef.current = controller
     generationIdRef.current = generationId
-    // 챗봇이 "드라이브 연결됐어?", "어떤 도구 켜져 있어?"에 답할 수 있게 앱 상태를 한 줄로 넘긴다.
-    const on = (Object.entries({ 'web search': modelOptions.webSearch, 'web fetch': modelOptions.webFetch, 'partial edit (text editor)': modelOptions.textEditor, memory: modelOptions.memory, 'code execution': modelOptions.codeExecution }) as [string, boolean][])
-      .filter(([, v]) => v).map(([k]) => k)
-    const appStatus = `${await storageStatusLine().catch(() => '')} Model: ${activeModel}. Tools on: ${on.join(', ') || 'none'}${modelOptions.advisorModel ? `, advisor (${modelOptions.advisorModel})` : ''}.`
     // 응답이 끝난 이유(onUsage 로 마지막에 한 번 온다). 잘린 응답이면 형식 보정 대신 '이어서 생성'을 안내한다.
     let stopReason: string | undefined
     const onUsage = (usage: TokenUsage) => { stopReason = usage.stopReason; recordUsage(usage) }
@@ -596,7 +592,6 @@ export default function App() {
             onSource: handleSource,
             onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
             onClientTool: runClientTool,
-            appStatus,
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
