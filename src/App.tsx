@@ -13,7 +13,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
+import { backupChat, chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
@@ -101,6 +101,8 @@ const IMAGE_ONLY_PROMPT = '이 이미지를 설명해 주세요'
 
 // 파일 편집처럼 연속으로 바뀌는 변경을 한 번에 저장하기 위한 대기 시간
 const SAVE_DELAY_MS = 500
+// 생성 도중 받은 부분을 최근 대화 백업(IndexedDB)에 남기는 간격. 브라우저가 죽어도 여기까지는 복구된다.
+const PARTIAL_BACKUP_MS = 4000
 
 // index.css 의 모바일 미디어 쿼리(max-width: 767px)와 같은 경계를 쓴다.
 const MOBILE_QUERY = '(max-width: 767px)'
@@ -474,6 +476,9 @@ export default function App() {
    * 8. 에러 처리
    *    - 에러 메시지를 채팅에 표시 (429·5xx 는 시작을 2회 다시 시도한 뒤 도달)
    */
+  // 지금 생성 중인 대화 id(부분 백업용). 새 대화의 첫 요청에서는 chatId 상태가 아직 갱신 전이라 따로 둔다.
+  const genChatIdRef = useRef<string | null>(null)
+
   // 끼어들어 말하기: 생성 중에 보내면 지금 답변을 멈추고(받은 부분은 남김) 멈춤 처리가 끝난 뒤 새 메시지를 보낸다.
   const interruptRef = useRef<{ prompt: string; images: MessageImage[] } | null>(null)
   const handleInterrupt = (prompt: string, images: MessageImage[] = []) => {
@@ -502,6 +507,7 @@ export default function App() {
     const generationId = crypto.randomUUID()
     // 새 대화의 첫 요청이면 이때 저장용 id 를 만든다.
     const id = chatId ?? crypto.randomUUID()
+    genChatIdRef.current = id
     if (!chatId) {
       setChatId(id)
       chatCreatedAtRef.current = Date.now()
@@ -538,6 +544,19 @@ export default function App() {
     const prevFiles = base.files
     const prevType = base.type
     baseProjectRef.current = base
+    // 받은 부분을 몇 초마다 백업한다. 복구되면 '끊긴 답변'(다시 시도 버튼)으로 보이고, 코드는 요청 전 상태로 둔다.
+    const backupId = genChatIdRef.current ?? chatId
+    let lastBackupAt = Date.now()
+    const backupPartial = () => {
+      if (!backupId) return
+      const { explanation } = parseVibe(bufferRef.current)
+      const partial = explanation || (bufferRef.current.includes('<VIBE_') ? '' : bufferRef.current.trim())
+      backupChat({
+        id: backupId, title: chatTitle(history), createdAt: chatCreatedAtRef.current || Date.now(), updatedAt: Date.now(),
+        messages: [...history, { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
+        projectFiles: prevFiles, projectType: prevType, githubRepo,
+      })
+    }
     const controller = new AbortController()
     abortRef.current = controller
     generationIdRef.current = generationId
@@ -601,6 +620,7 @@ export default function App() {
           }
           return updated
         })
+        if (Date.now() - lastBackupAt >= PARTIAL_BACKUP_MS) { lastBackupAt = Date.now(); backupPartial() }
       }
 
       flushPendingRealtimePatch()
