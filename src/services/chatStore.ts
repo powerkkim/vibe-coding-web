@@ -1,5 +1,5 @@
 import type { Message } from './ai'
-import { driveAccount, DriveAuthError, isDriveConnected, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
+import { driveAccount, DriveAuthError, driveMinutesLeft, isDriveConfigured, isDriveConnected, isDriveExpired, listFiles, readFile, removeFile, waitForRenewal, writeFile } from './drive'
 import { backupForget, backupGet, backupGetAll, backupPut, localDelete, localGet, localGetAll, localPut } from './localStore'
 
 /**
@@ -304,4 +304,18 @@ export function chatTitle(messages: Message[]): string {
   const first = messages.find((m) => m.role === 'user')?.content.trim() ?? ''
   const line = first.split('\n')[0]
   return line.length > 40 ? `${line.slice(0, 40)}…` : line || '새 대화'
+}
+
+/**
+ * 챗봇에게 넘기는 저장 상태 한 줄(영문, 짧게). Claude 는 앱 상태를 직접 볼 수 없어서
+ * "드라이브 연결됐어?" 같은 질문에 답하려면 앱이 알려줘야 한다.
+ */
+export async function storageStatusLine(): Promise<string> {
+  if (!USE_DRIVE) return 'Chats are saved to the chat server.'
+  const pending = (await localGetAll<LocalCopy>().catch(() => [] as LocalCopy[])).filter(sameAccount).length
+  const wait = pending ? ` ${pending} chat(s) are waiting in this browser to be uploaded.` : ''
+  if (!isDriveConfigured()) return 'Google Drive is not configured (no client ID); chats are saved only in this browser (IndexedDB).'
+  if (isDriveConnected()) return `Google Drive is connected as ${driveAccount()?.email ?? 'unknown account'}; chats are saved to its hidden app folder. Sign-in token valid for about ${driveMinutesLeft()} more minutes (renews silently on the next click).${wait}`
+  if (isDriveExpired()) return `Google Drive sign-in for ${driveAccount()?.email} has expired; chats are saved in this browser for now and upload automatically after reconnecting (any click reconnects).${wait}`
+  return `Google Drive is not connected; chats are saved only in this browser. The user can press "Google 드라이브 연결" at the bottom left.${wait}`
 }

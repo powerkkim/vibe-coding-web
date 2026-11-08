@@ -127,6 +127,8 @@ export interface StreamHooks {
   onFile?: (fileId: string) => void
   // 앱 도구 실행. 없으면 앱 도구 호출에서 멈춘다.
   onClientTool?: (name: string, input: Record<string, unknown>) => Promise<ClientToolResult>
+  // 앱 상태 한 줄(저장소·드라이브 연결·켜진 도구). 매 요청 끝의 system 메시지에 붙는다.
+  appStatus?: string
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -402,9 +404,11 @@ export async function* streamCode(
   const advisorOn = betas.includes(ADVISOR_BETA)
   // 빠른 모드·어드바이저를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 그때는 fallback 을 쓰지 않는다.
   const useFallback = (info?.fallback ?? false) && !fast && !advisorOn
+  // 앱 상태는 캐시 지점(마지막 user) 뒤라 매번 바뀌어도 캐시를 깨지 않는다.
+  const tail = [hooks.appStatus ? `[App status — use only if the user asks about the app]\n${hooks.appStatus}` : '', currentContext].filter(Boolean).join('\n\n')
   const baseMessages = [
     ...apiMessages(messages),
-    ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
+    ...(tail ? [{ role: 'system' as const, content: tail }] : []),
   ]
   const request: Record<string, unknown> = {
     model,
