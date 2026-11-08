@@ -256,7 +256,7 @@ export async function importPicked(chatId: string, title: string, picked: { id: 
   const exp = picked.mimeType ? GOOGLE_EXPORT[picked.mimeType] : undefined
   const name = exp && !picked.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${picked.name}.${exp.ext}` : picked.name
   const blob = await fetchContent(picked.id, picked.mimeType)
-  const path = `imports/${name.replace(/[\\/]+/g, '_')}`
+  const path = `imports/${cleanFileName(name)}`
   await saveToProject(chatId, title, path, blob)
   const isText = TEXT_EXT.test(name) && blob.size <= IMPORT_TEXT_LIMIT
   return { path, size: blob.size, source: picked.name, ...(isText ? { text: await blob.text() } : {}) }
@@ -363,4 +363,10 @@ function blobBase64(blob: Blob): Promise<string> {
     r.onerror = () => reject(r.error)
     r.readAsDataURL(blob)
   })
+}
+
+/** 파일 이름 정리: 경로 구분자·제어문자 → '_', 이어진 점은 하나로, 앞뒤 점·공백 제거 */
+export function cleanFileName(name: string): string {
+  const n = name.replace(/[\\/\u0000-\u001f]+/g, '_').replace(/\.{2,}/g, '.').replace(/^[\s.]+|[\s.]+$/g, '')
+  return n || 'file'
 }
