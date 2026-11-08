@@ -38,6 +38,9 @@ interface Props {
   onPickDriveFile?: () => Promise<PickerDoc | null>
   // 보낼 때 첨부 파일을 받지 못한 경우 등
   attachError?: string
+  // 지금 대화가 속한 프로젝트 이름(없으면 일반 대화). 누르면 프로젝트 설정을 연다.
+  projectName?: string
+  onOpenProject?: () => void
   isLoading: boolean
   hasApiKey: boolean
   width?: number
@@ -146,7 +149,7 @@ function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (i
   )
 }
 
-export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -360,6 +363,12 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
         flex: width ? undefined : '1',
       }}>
 
+      {projectName && (
+        <div className="project-bar">
+          <button onClick={onOpenProject} className="project-badge" title="프로젝트 설정">📁 {projectName}</button>
+          <span style={{ color: 'var(--txt-3)', fontSize: 11 }}>이 대화는 프로젝트 지침·공유 자료를 함께 받아요</span>
+        </div>
+      )}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {messages.length === 0 ? (

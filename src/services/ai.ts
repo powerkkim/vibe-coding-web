@@ -147,6 +147,8 @@ export interface StreamHooks {
   onClientTool?: (name: string, input: Record<string, unknown>) => Promise<ClientToolResult>
   // 앱이 직접 정의하는 도구(앱 상태 확인·드라이브 연결 요청). 직접 호출 모드에서만 싣는다.
   appTools?: Record<string, unknown>[]
+  // 프로젝트 지침·공유 자료(projectStore.projectContext). 시스템 프롬프트 다음 블록으로 캐시한다.
+  projectContext?: string
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -451,7 +453,11 @@ export async function* streamCode(
     // 생각은 항상 켜져 있다(adaptive). 요약을 받을 때만 display 를 지정한다.
     ...(options.showThinking ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
     // 캐시 지점 ①: 고정 시스템 프롬프트
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    // 캐시 지점 ①-2: 프로젝트 지침·공유 자료(같은 프로젝트 안에서는 바뀌지 않아 캐시로 읽힌다)
+    system: [
+      { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+      ...(hooks.projectContext ? [{ type: 'text', text: hooks.projectContext, cache_control: { type: 'ephemeral' } }] : []),
+    ],
     messages: baseMessages,
     // 서버 도구(검색·페치·코드 실행·어드바이저)는 Anthropic 이 실행하고, 앱 도구(메모리·에디터)는 앱이 실행해 결과를 돌려준다.
     ...(tools.length ? { tools } : {}),

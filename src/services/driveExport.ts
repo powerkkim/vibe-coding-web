@@ -53,14 +53,65 @@ async function rootFolder(): Promise<string> {
 
 const safeName = (t: string) => (t.replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 50) || '새 프로젝트')
 
-/** 대화(프로젝트)용 폴더. chatId 로 찾으므로 제목이 바뀌어도 같은 폴더를 쓴다. */
+// 대화 → 소속 프로젝트(App 이 대화를 열거나 옮길 때 알려 준다). 프로젝트 대화는 'Vibe Coding/<프로젝트>/<대화>/' 에 저장된다.
+const chatProjects = new Map<string, { id: string; name: string } | undefined>()
+export function bindChatProject(chatId: string, project?: { id: string; name: string }) {
+  const prev = chatProjects.get(chatId)
+  chatProjects.set(chatId, project)
+  if (prev?.id !== project?.id) folderIds.delete(`chat:${chatId}`)   // 다음 저장 때 위치를 다시 확인(필요하면 폴더 이동)
+}
+
+/** 프로젝트 폴더('Vibe Coding/<프로젝트 이름>'). projectId 로 찾으므로 이름을 바꿔도 같은 폴더를 쓴다. */
+async function projectRoot(project: { id: string; name: string }): Promise<string> {
+  const key = `project:${project.id}`
+  const cached = folderIds.get(key)
+  if (cached) return cached
+  const root = await rootFolder()
+  const found = await findOne(`appProperties has { key='vibeProjectId' and value='${q(project.id)}' } and mimeType = '${FOLDER}'`)
+  const id = found?.id ?? await createFolder(safeName(project.name), root, { vibeProjectId: project.id })
+  folderIds.set(key, id)
+  return id
+}
+
+/** 프로젝트 이름을 바꾸면 드라이브 폴더 이름도 바꾼다(폴더가 아직 없으면 아무것도 안 함). */
+export async function renameProjectFolder(project: { id: string; name: string }) {
+  if (!hasFileScope()) return
+  const found = await findOne(`appProperties has { key='vibeProjectId' and value='${q(project.id)}' } and mimeType = '${FOLDER}'`)
+  if (!found) return
+  await json(await driveRequest(`${DRIVE_API}/files/${found.id}?fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: safeName(project.name) }) }))
+}
+
+/** 대화를 다른 프로젝트로 옮겼을 때, 이미 있는 대화 폴더만 새 위치로 옮긴다(없으면 아무것도 만들지 않는다). */
+export async function moveChatFolder(chatId: string): Promise<void> {
+  if (!hasFileScope()) return
+  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`, 'id,parents')
+  if (!found) return
+  const project = chatProjects.get(chatId)
+  const parent = project ? await projectRoot(project) : await rootFolder()
+  const parents = (found.parents as unknown as string[] | undefined) ?? []
+  if (!parents.includes(parent)) {
+    await json(await driveRequest(`${DRIVE_API}/files/${found.id}?addParents=${parent}&removeParents=${parents.join(',')}&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }))
+  }
+  folderIds.set(`chat:${chatId}`, found.id)
+}
+
+/**
+ * 대화용 폴더. chatId 로 찾으므로 제목이 바뀌어도 같은 폴더를 쓴다.
+ * 프로젝트 대화면 프로젝트 폴더 아래에 두고, 대화를 다른 프로젝트로 옮겼으면 폴더도 옮긴다.
+ */
 export async function projectFolder(chatId: string, title: string): Promise<string> {
   const key = `chat:${chatId}`
   const cached = folderIds.get(key)
   if (cached) return cached
-  const root = await rootFolder()
-  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`)
-  const id = found?.id ?? await createFolder(`${safeName(title)} (${chatId.slice(0, 6)})`, root, { chatId })
+  const project = chatProjects.get(chatId)
+  const parent = project ? await projectRoot(project) : await rootFolder()
+  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`, 'id,parents')
+  let id = found?.id
+  if (id && found?.parents && !found.parents.includes(parent)) {
+    const remove = (found.parents as unknown as string[]).join(',')
+    await json(await driveRequest(`${DRIVE_API}/files/${id}?addParents=${parent}&removeParents=${remove}&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }))
+  }
+  id ??= await createFolder(`${safeName(title)} (${chatId.slice(0, 6)})`, parent, { chatId })
   folderIds.set(key, id)
   return id
 }

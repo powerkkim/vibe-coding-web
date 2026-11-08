@@ -15,7 +15,10 @@ import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
-import { exportProject, FileScopeError, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
+import ProjectModal from './components/ProjectModal'
+import { loadProjects, newProject, projectContext, saveProjects } from './services/projectStore'
+import type { Project } from './services/projectStore'
+import { bindChatProject, exportProject, FileScopeError, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
 import type { PickerDoc } from './services/driveExport'
 import { downloadOutputFile } from './services/ai'
 import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
@@ -340,6 +343,9 @@ export default function App() {
   useEffect(() => { chatCacheRef.current.clear() }, [driveConnected])
 
   useEffect(() => {
+    loadProjects().then(setProjects).catch(() => {})
+  }, [driveConnected])
+  useEffect(() => {
     if (!storageReady) return
     listChats(activeApiKey).then(setChats).catch(storageFailMessage('대화 목록을 불러오지 못했습니다'))
   }, [activeApiKey, storageReady, driveConnected])
@@ -371,19 +377,80 @@ export default function App() {
       projectFiles,
       projectType,
       githubRepo,
+      projectId: chatProjectIdRef.current,
     }
     chatCacheRef.current.set(chat.id, chat)
     const where = await saveChat(activeApiKey, chat)
     // 연결된 상태인데 브라우저에 저장됐다 = 드라이브 저장이 실패해 대기 저장으로 돌린 것
     setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
-    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, projectId: chat.projectId, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+  }
+
+  // ── 프로젝트 ───────────────────────────────────────────────
+  const [projects, setProjects] = useState<Project[]>([])
+  // 지금 대화가 속한 프로젝트(새 대화면 '프로젝트에서 새 대화'로 정해진다). 저장·요청에서 바로 읽도록 ref 도 둔다.
+  const [chatProjectId, setChatProjectIdState] = useState<string | null>(null)
+  const chatProjectIdRef = useRef<string | null>(null)
+  const setChatProjectId = (pid: string | null) => { chatProjectIdRef.current = pid; setChatProjectIdState(pid) }
+  const [projectModal, setProjectModal] = useState<Project | 'new' | null>(null)
+  const currentProject = projects.find((p) => p.id === chatProjectId)
+  const updateProjects = (next: Project[]) => {
+    setProjects(next)
+    saveProjects(next).catch(() => {})
+  }
+  const handleSaveProject = (p: Project) => {
+    const exists = projects.some((x) => x.id === p.id)
+    const prev = projects.find((x) => x.id === p.id)
+    updateProjects(exists ? projects.map((x) => (x.id === p.id ? p : x)) : [p, ...projects])
+    if (prev && prev.name !== p.name) renameProjectFolder(p).catch(() => {})
+    setProjectModal(null)
+  }
+  /** 프로젝트 삭제: 대화는 지우지 않고 프로젝트 밖으로 꺼낸다(드라이브 폴더도 그대로). */
+  const handleDeleteProject = (p: Project) => {
+    updateProjects(projects.filter((x) => x.id !== p.id))
+    if (chatProjectId === p.id) setChatProjectId(null)
+    setProjectModal(null)
+  }
+  /** 프로젝트 안에서 새 대화 */
+  const handleNewChatInProject = (pid: string) => {
+    if (isLoading) return
+    resetConversation()
+    setChatId(null)
+    setChatProjectId(pid)
+    setMobileTab('chat')
+    if (isMobile) setSidebarOpen(false)
+  }
+  /** 대화를 다른 프로젝트로 옮기거나(pid) 프로젝트에서 뺀다(null). */
+  const handleMoveChat = async (id: string, pid: string | null) => {
+    try {
+      const chat = id === chatId
+        ? null
+        : chatCacheRef.current.get(id) ?? await loadChat(activeApiKey, id)
+      if (id === chatId) {
+        setChatProjectId(pid)
+        bindChatProject(id, projects.find((p) => p.id === pid))
+        if (isDriveConnected()) moveChatFolder(id).catch(() => {})
+        unsavedRef.current = true
+        setChats((prev) => prev.map((c) => (c.id === id ? { ...c, projectId: pid } : c)))
+        return
+      }
+      if (!chat) return
+      const moved = { ...chat, projectId: pid }
+      chatCacheRef.current.set(id, moved)
+      bindChatProject(id, projects.find((p) => p.id === pid))
+      if (isDriveConnected()) moveChatFolder(id).catch(() => {})
+      await saveChat(activeApiKey, moved)
+      setChats((prev) => prev.map((c) => (c.id === id ? { ...c, projectId: pid } : c)))
+    } catch (e) {
+      storageFailMessage('대화를 옮기지 못했습니다')(e)
+    }
   }
 
   // 저장 대기(0.5초) 중에 탭을 닫으면 그 내용을 브라우저에 대기 저장해 둔다.
   useEffect(() => {
     const onHide = () => {
       if (!chatId || messages.length === 0 || !unsavedRef.current) return
-      savePendingNow({ id: chatId, title: chatTitle(messages), createdAt: chatCreatedAtRef.current, updatedAt: Date.now(), messages, projectFiles, projectType, githubRepo })
+      savePendingNow({ id: chatId, title: chatTitle(messages), createdAt: chatCreatedAtRef.current, updatedAt: Date.now(), messages, projectFiles, projectType, githubRepo, projectId: chatProjectIdRef.current })
     }
     window.addEventListener('pagehide', onHide)
     return () => window.removeEventListener('pagehide', onHide)
@@ -751,7 +818,7 @@ export default function App() {
       backupChat({
         id: backupId, title: chatTitle(history), createdAt: chatCreatedAtRef.current || Date.now(), updatedAt: Date.now(),
         messages: [...history, { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
-        projectFiles: prevFiles, projectType: prevType, githubRepo,
+        projectFiles: prevFiles, projectType: prevType, githubRepo, projectId: chatProjectIdRef.current,
       })
     }
     const controller = new AbortController()
@@ -772,6 +839,7 @@ export default function App() {
             onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
             onClientTool: runClientTool,
             appTools: APP_TOOLS,
+            projectContext: projectContext(projects.find((p) => p.id === chatProjectIdRef.current)),
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
@@ -914,6 +982,7 @@ export default function App() {
         return updated
       })
       // 프로젝트 파일 자동 저장(내 드라이브). 응답을 막지 않도록 뒤에서 처리한다.
+      if (backupId) bindChatProject(backupId, projects.find((p) => p.id === chatProjectIdRef.current))
       if (USE_DRIVE && driveAutoSave && Object.keys(files).length > 0 && backupId && isDriveConnected()) {
         if (hasFileScope()) {
           exportProject(backupId, chatTitle(history), projectFilesRef.current)
@@ -1027,6 +1096,7 @@ export default function App() {
     if (isLoading) return
     resetConversation()
     setChatId(null)
+    setChatProjectId(null)
     setMobileTab('chat')
     if (isMobile) setSidebarOpen(false)
   }
@@ -1044,6 +1114,8 @@ export default function App() {
       resetConversation()
       setDriveFolderUrl(null)
       setChatId(chat.id)
+      setChatProjectId(chat.projectId ?? null)
+      bindChatProject(chat.id, projects.find((p) => p.id === chat.projectId))
       chatCreatedAtRef.current = chat.createdAt
       setMessages(chat.messages)
       projectFilesRef.current = chat.projectFiles
@@ -1126,6 +1198,12 @@ export default function App() {
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
+      projects={projects}
+      activeProjectId={chatProjectId}
+      onNewProject={() => setProjectModal('new')}
+      onEditProject={(p) => setProjectModal(p)}
+      onNewChatInProject={handleNewChatInProject}
+      onMoveChat={handleMoveChat}
       onDelete={handleDeleteChat}
       onClose={toggleSidebar}
       drive={USE_DRIVE ? { autoSave: driveAutoSave, onAutoSave: toggleDriveAutoSave, folderUrl: driveFolderUrl, configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
@@ -1176,6 +1254,8 @@ export default function App() {
             messages={messages}
             onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
             attachError={attachError}
+            projectName={currentProject?.name}
+            onOpenProject={() => currentProject && setProjectModal(currentProject)}
             onStop={handleStop}
             onRetry={handleRetry}
             onContinue={handleContinue}
@@ -1240,6 +1320,17 @@ export default function App() {
           />
         </div>
       </div>
+      {projectModal && (
+        <ProjectModal
+          project={projectModal === 'new' ? newProject('') : projectModal}
+          isNew={projectModal === 'new'}
+          chatCount={projectModal === 'new' ? 0 : chats.filter((c) => c.projectId === projectModal.id).length}
+          onPickKnowledge={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? pickForAttachment : undefined}
+          onSave={handleSaveProject}
+          onDelete={handleDeleteProject}
+          onClose={() => setProjectModal(null)}
+        />
+      )}
       {driveModal && (driveModal === 'scope' ? !hasFileScope() : !driveConnected) && (
         <DriveConnectModal mode={driveModal} busy={driveBusy} error={driveModalError} onConnect={connectFromModal} onClose={closeDriveModal} />
       )}
