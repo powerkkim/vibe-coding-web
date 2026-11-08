@@ -178,13 +178,14 @@ export const MODELS: AIModel[] = [
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
 ]
 
-/**
- * 컨텍스트 게이지의 기준(권장 한도) 토큰.
- * 대화가 길수록 매 턴 이전 대화 전체를 다시 보내므로, 실제 모델 한도와 별개로 비용 기준으로 잡는다.
- * Haiku 는 10만 토큰을 넘으면 단가가 5배가 되므로 그 지점을 기준으로 한다.
- */
-export function contextBudget(model: string): number {
-  return MODELS.find((m) => m.id === model)?.longPrompt?.overTokens ?? 200_000
+/** 컨텍스트 게이지의 기준: 모델의 실제 컨텍스트 한도(현재 모델 모두 1M, 문서: build-with-claude/context-windows) */
+export const CONTEXT_WINDOW = 1_000_000
+export function contextBudget(_model: string): number {
+  return CONTEXT_WINDOW
+}
+/** 이 토큰 수를 넘으면 단가가 오르는 모델(Haiku 5.5 의 10만)이면 그 값 */
+export function longPromptThreshold(model: string): number | undefined {
+  return MODELS.find((m) => m.id === model)?.longPrompt?.overTokens
 }
 
 export type CodeMode = 'auto' | 'manual'

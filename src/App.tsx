@@ -30,7 +30,7 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
 import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
@@ -1310,6 +1310,7 @@ export default function App() {
             tokenUsage={tokenUsage}
             contextTokens={contextTokens}
             contextBudget={contextBudget(activeModel)}
+            priceJumpAt={longPromptThreshold(activeModel)}
             onNewChat={() => (chatProjectIdRef.current ? handleNewChatInProject(chatProjectIdRef.current) : handleNewChat())}
             balance={balance}
             onBalanceChange={handleBalanceChange}
