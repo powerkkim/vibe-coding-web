@@ -1174,6 +1174,14 @@ export default function App() {
     setMobileTab('preview')
   }
 
+  // 상단 '미리보기' 버튼: 파일을 만든 가장 최근 답변으로 미리보기를 연다.
+  const handleOpenPreview = () => {
+    const last = messages.map((m) => Object.keys(m.files ?? {}).length > 0).lastIndexOf(true)
+    if (last >= 0) return handleOpenAnswer(last)
+    setCanvasClosed(false)
+    setMobileTab('preview')
+  }
+
   // 답변 시점의 파일 사본으로 현재 프로젝트를 바꾼다. 코드 탭에서 직접 고친 내용도 함께 사라지므로 먼저 확인받는다.
   const handleRestore = (index: number) => {
     const { snapshot, projectType: pType } = messages[index] ?? {}
@@ -1257,6 +1265,7 @@ export default function App() {
             onToggleTheme={toggleTheme}
             onNewChat={handleNewChat}
             busy={isLoading}
+            onOpenPreview={Object.keys(projectFiles).length > 0 && (canvasClosed || (isMobile && mobileTab === 'chat')) ? handleOpenPreview : undefined}
           />
           {/* ChatPanel 은 가로 줄 안에서 너비를 잡도록 짜여 있어 남은 높이를 채우는 가로 줄로 감싼다. */}
           <div className="flex flex-1 min-h-0">
