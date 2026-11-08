@@ -24,7 +24,9 @@ import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
 import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
-import type { ModelOptions, WebSource } from './services/ai'
+import type { ClientToolResult, ModelOptions, WebSource } from './services/ai'
+import { runEditorCommand } from './services/textEditor'
+import { runMemoryCommand } from './services/memoryStore'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
 import { addUsage, estimateCost, loadBalance, loadUsage, resetUsage, setBalance } from './services/usage'
 import type { Balance } from './services/usage'
@@ -418,7 +420,29 @@ export default function App() {
     const prev = sourcesRef.current.get(src.url)
     if (!prev || (src.cited && !prev.cited)) sourcesRef.current.set(src.url, src)
   }
-  const handleSearch = (query: string) => handleThinking(`${thinkingRef.current ? '\n' : ''}🔎 "${query}" 검색 중…\n`)
+  // 도구 진행 상황(검색어·읽는 URL·실행 명령·파일 수정 등)을 생각 요약 칸에 한 줄씩 붙인다.
+  const handleActivity = (line: string) => handleThinking(`${thinkingRef.current && !thinkingRef.current.endsWith('\n') ? '\n' : ''}${line}\n`)
+  // 코드 실행이 만든 파일(Files API id)
+  const outputFilesRef = useRef<string[]>([])
+  // 텍스트 에디터로 이번 턴에 바뀐 파일
+  const editedRef = useRef(new Set<string>())
+  /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
+  const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
+    if (name === 'memory') return runMemoryCommand(input)
+    if (name === 'str_replace_based_edit_tool') {
+      const base = baseProjectRef.current
+      const { result, next, changed } = runEditorCommand(projectFilesRef.current, input)
+      if (next && changed) {
+        // 이후 스트리밍 파일 반영(mergeFiles)도 이 수정본 위에 쌓이도록 기준 프로젝트를 함께 갱신한다.
+        baseProjectRef.current = { files: next, type: base.type }
+        projectFilesRef.current = next
+        setProjectFiles(next)
+        editedRef.current.add(changed)
+      }
+      return result
+    }
+    return { content: `Error: unknown tool ${name}`, isError: true }
+  }
   // 생각 요약을 받으면 본문이 나오기 전의 빈 답변 자리에 붙인다.
   const thinkingRef = useRef('')
   const handleThinking = (text: string) => {
@@ -450,8 +474,22 @@ export default function App() {
    * 8. 에러 처리
    *    - 에러 메시지를 채팅에 표시 (429·5xx 는 시작을 2회 다시 시도한 뒤 도달)
    */
+  // 끼어들어 말하기: 생성 중에 보내면 지금 답변을 멈추고(받은 부분은 남김) 멈춤 처리가 끝난 뒤 새 메시지를 보낸다.
+  const interruptRef = useRef<{ prompt: string; images: MessageImage[] } | null>(null)
+  const handleInterrupt = (prompt: string, images: MessageImage[] = []) => {
+    interruptRef.current = { prompt, images }
+    handleStop()
+  }
+  useEffect(() => {
+    if (isLoading || !interruptRef.current) return
+    const next = interruptRef.current
+    interruptRef.current = null
+    handleSend(next.prompt, next.images)
+  }, [isLoading])
+
   const handleSend = async (prompt: string, images: MessageImage[] = [], base: Message[] = messages) => {
-    if (!activeApiKey || isLoading) return
+    if (!activeApiKey) return
+    if (isLoading) return handleInterrupt(prompt, images)
     // 새 요청의 결과물을 바로 보도록 닫아 둔 캔버스를 다시 연다.
     setCanvasClosed(false)
     // 이미지만 보내고 글을 비우면 기본 요청을 넣는다. API 는 빈 텍스트 블록을 받지 않는다.
@@ -484,6 +522,8 @@ export default function App() {
     bufferRef.current = ''
     thinkingRef.current = ''
     sourcesRef.current = new Map()
+    outputFilesRef.current = []
+    editedRef.current = new Set()
     lastRealtimePatchRef.current = ''
     lastRealtimePatchAtRef.current = 0
     pendingRealtimePatchRef.current = null
@@ -510,7 +550,12 @@ export default function App() {
     try {
       const chunks = resume
         ? resumeCode(activeApiKey, generationId, onUsage, controller.signal)
-        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking, { onSearch: handleSearch, onSource: handleSource })
+        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking, {
+            onActivity: handleActivity,
+            onSource: handleSource,
+            onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
+            onClientTool: runClientTool,
+          })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
         // 응답이 시작되면 진행 중인 답변을 현재 답변으로 표시한다. 본문은 대화에 바로 나온다.
@@ -552,6 +597,7 @@ export default function App() {
             role: 'assistant',
             content: explanation || (bufferRef.current.includes('<VIBE_') ? '생성 중...' : bufferRef.current),
             files: {},
+            ...(thinkingRef.current ? { thinking: thinkingRef.current } : {}),
           }
           return updated
         })
@@ -612,7 +658,9 @@ export default function App() {
         }
       }
 
-      const { files, explanation } = parsed
+      const { explanation } = parsed
+      // 텍스트 에디터로 고친 파일도 이번 답변의 결과물로 친다(되돌리기 지점·'파일 N개' 표시).
+      const files = { ...Object.fromEntries([...editedRef.current].map((n) => [n, baseProjectRef.current.files[n] ?? ''])), ...parsed.files }
       // 끝까지 받은(닫는 태그가 있는) 파일만 parseVibe 가 돌려주므로 잘린 응답이어도 완성된 파일은 반영한다.
       const pType = mergedType(baseProjectRef.current, files, parsed.projectType)
       if (Object.keys(files).length > 0) {
@@ -640,6 +688,7 @@ export default function App() {
           ...(truncated ? { truncated } : {}),
           // 인용된 출처를 앞에, 최대 10개
           ...(sourcesRef.current.size ? { sources: [...sourcesRef.current.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
+          ...(outputFilesRef.current.length ? { outputs: [...outputFilesRef.current] } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
           ...(Object.keys(files).length > 0 ? { snapshot: projectFilesRef.current, projectType: pType } : {}),

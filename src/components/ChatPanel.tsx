@@ -4,6 +4,7 @@ import AnswerView from './AnswerView'
 import type { Message, MessageImage, TokenUsage } from '../services/ai'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
 import { formatUsd, remainingBalance } from '../services/usage'
+import { downloadOutputFile } from '../services/ai'
 import type { Balance } from '../services/usage'
 import type { UsageTotals } from '../services/usage'
 
@@ -69,6 +70,45 @@ function Dots() {
   )
 }
 
+/** 도구 진행 줄(🔎🌐⚙️🧠💾✏️ 로 시작) 중 마지막 것 */
+const ACTIVITY = /^(🔎|🌐|⚙️|🧠|💾|✏️)/u
+function lastActivity(thinking?: string) {
+  return thinking?.trim().split('\n').filter((l) => ACTIVITY.test(l)).pop()
+}
+
+/** 코드 실행이 만든 파일 목록. 누르면 Files API 로 받아 저장한다(키는 이 브라우저에서만 쓴다). */
+function OutputFiles({ ids }: { ids: string[] }) {
+  const [state, setState] = useState<Record<string, string>>({})
+  const save = async (id: string) => {
+    setState((s) => ({ ...s, [id]: '받는 중…' }))
+    try {
+      const { name, blob } = await downloadOutputFile(id)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = name; a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      setState((s) => ({ ...s, [id]: name }))
+    } catch (e) {
+      setState((s) => ({ ...s, [id]: e instanceof Error ? e.message : '받지 못했습니다' }))
+    }
+  }
+  return (
+    <div className="sources">
+      <div style={{ fontWeight: 500 }}>코드 실행으로 만든 파일 {ids.length}개</div>
+      <ol>
+        {ids.map((id, n) => (
+          <li key={id}>
+            <button onClick={() => save(id)} style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
+              {state[id] && !state[id].endsWith('…') && !state[id].startsWith('Error') ? `${state[id]} 다시 받기` : `파일 ${n + 1} 받기`}
+            </button>
+            {state[id]?.endsWith('…') && <span className="sources-host">{state[id]}</span>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
 export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinue, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
@@ -124,7 +164,8 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
 
   const submit = () => {
     const t = input.trim()
-    if ((!t && images.length === 0) || isLoading || !hasApiKey) return
+    // 생성 중에 보내면 '끼어들어 말하기': 지금 답변을 멈추고 이 메시지를 이어서 보낸다(App 이 처리).
+    if ((!t && images.length === 0) || !hasApiKey) return
     onSend(t, images); setInput(''); setImages([]); setImageError('')
     if (taRef.current) taRef.current.style.height = 'auto'
   }
@@ -139,7 +180,10 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
     e.target.style.height = Math.min(e.target.scrollHeight, 180) + 'px'
   }
 
-  const canSend = (!!input.trim() || images.length > 0) && !isLoading && hasApiKey
+  const hasDraft = !!input.trim() || images.length > 0
+  const canSend = hasDraft && hasApiKey
+  // 생성 중 + 입력 없음 → 정지 버튼, 생성 중 + 입력 있음 → 끼어들어 보내기
+  const interrupting = isLoading && hasDraft
 
   // 입력창 묶음. 대화가 비어 있으면 화면 가운데에, 있으면 아래에 둔다.
   const composer = (
@@ -183,8 +227,8 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
           <textarea ref={taRef} value={input}
             onChange={onInput} onKeyDown={onKey} onPaste={onPaste}
             aria-label="메시지 입력"
-            placeholder={hasApiKey ? '만들고 싶은 것을 설명해 주세요' : 'API 키를 먼저 설정해 주세요'}
-            disabled={!hasApiKey || isLoading} rows={2}
+            placeholder={!hasApiKey ? 'API 키를 먼저 설정해 주세요' : isLoading ? '생성 중에도 입력할 수 있어요. 보내면 지금 답변을 멈추고 이어서 말합니다' : '만들고 싶은 것을 설명해 주세요'}
+            disabled={!hasApiKey} rows={2}
             className="w-full bg-transparent resize-none disabled:opacity-40"
             style={{
               display: 'block',
@@ -202,7 +246,7 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
           <div className="flex items-center justify-between px-3 pb-2.5">
             <span className="flex items-center gap-2">
               <button onClick={() => fileInputRef.current?.click()}
-                disabled={!hasApiKey || isLoading || images.length >= MAX_IMAGES_PER_MESSAGE}
+                disabled={!hasApiKey || images.length >= MAX_IMAGES_PER_MESSAGE}
                 aria-label="이미지 추가 (붙여넣기·끌어다 놓기도 됩니다)"
                 className="icon-btn tip-up">
                 <ImagePlus style={{ width: 16, height: 16 }} />
@@ -214,8 +258,8 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
                 Shift+Enter 줄바꿈
               </span>
             </span>
-            <button onClick={isLoading ? onStop : submit} disabled={!isLoading && !canSend}
-              aria-label={isLoading ? '생성 중지' : '전송'}
+            <button onClick={isLoading && !interrupting ? onStop : submit} disabled={!isLoading && !canSend}
+              aria-label={interrupting ? '지금 답변을 멈추고 보내기' : isLoading ? '생성 중지' : '전송'}
               className="tip tip-up flex items-center justify-center transition-colors"
               style={{
                 width: 32,
@@ -228,7 +272,7 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
               }}
               onMouseEnter={e => { if (canSend || isLoading) e.currentTarget.style.background = 'var(--accent-h)' }}
               onMouseLeave={e => { if (canSend || isLoading) e.currentTarget.style.background = 'var(--accent)' }}>
-              {isLoading
+              {isLoading && !interrupting
                 ? <Square style={{ width: 12, height: 12 }} fill="currentColor" />
                 : <ArrowUp style={{ width: 16, height: 16 }} />}
             </button>
@@ -357,11 +401,12 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
                         )}
                       </>)}
                   {/* 본문이 이미 나오는 중에 검색을 시작하면 마지막 검색어를 작게 보여준다 */}
-                  {isLoading && i === messages.length - 1 && msg.content && msg.thinking?.includes('🔎') && (
+                  {isLoading && i === messages.length - 1 && msg.content && lastActivity(msg.thinking) && (
                     <p role="status" style={{ fontSize: 'var(--fs-xs)', color: 'var(--txt-3)', margin: 0 }}>
-                      {msg.thinking.trim().split('\n').filter((l) => l.startsWith('🔎')).pop()}
+                      {lastActivity(msg.thinking)}
                     </p>
                   )}
+                  {msg.outputs && msg.outputs.length > 0 && <OutputFiles ids={msg.outputs} />}
                   {msg.sources && msg.sources.length > 0 && (
                     <details className="sources" open={msg.sources.some((s) => s.cited)}>
                       <summary>출처 {msg.sources.filter((s) => s.cited).length || msg.sources.length}개{msg.sources.some((s) => s.cited) ? '' : ' (검색한 페이지)'}</summary>

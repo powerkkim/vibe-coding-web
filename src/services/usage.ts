@@ -28,7 +28,7 @@ function empty(): UsageTotals {
 }
 
 /** 모델 단가로 계산한 요청 1건의 예상 비용(USD). 모르는 모델이면 0. */
-export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens' | 'fast' | 'webSearches'>): number {
+export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens'> & Partial<Pick<TokenUsage, 'fast' | 'webSearches' | 'advisor'>>): number {
   const model = MODELS.find((m) => m.id === modelId)
   if (!model) return 0
   // 긴 프롬프트 판정은 캐시 토큰을 포함한 전체 입력 기준이다(Anthropic 가격표).
@@ -43,7 +43,11 @@ export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTok
   const input = uncached * inputRate
     + usage.cacheWriteTokens * inputRate * CACHE_WRITE_MULTIPLIER
     + usage.cacheReadTokens * cacheReadRate
-  return ((input + usage.completionTokens * outputRate) * multiplier) / 1_000_000 + (usage.webSearches ?? 0) * WEB_SEARCH_COST
+  // 어드바이저 호출은 조언 모델 단가로 따로 계산한다.
+  const advisorCost = (usage.advisor ?? []).reduce((sum, a) => sum + estimateCost(a.model, {
+    promptTokens: a.inputTokens, cacheReadTokens: a.cacheReadTokens, cacheWriteTokens: a.cacheWriteTokens, completionTokens: a.outputTokens,
+  }), 0)
+  return ((input + usage.completionTokens * outputRate) * multiplier) / 1_000_000 + (usage.webSearches ?? 0) * WEB_SEARCH_COST + advisorCost
 }
 
 export function loadUsage(): UsageTotals {

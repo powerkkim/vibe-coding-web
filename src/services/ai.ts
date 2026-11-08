@@ -16,6 +16,8 @@ export interface Message {
   thinking?: string
   // 웹 검색 출처. 답변이 인용한 페이지(cited)와, 검색했지만 인용하지 않은 페이지. 화면에만 쓰고 API 로는 보내지 않는다.
   sources?: WebSource[]
+  // 코드 실행이 만든 파일(Files API id). 다운로드 버튼으로 받는다.
+  outputs?: string[]
   // 이 답변이 끝난 시점의 전체 프로젝트 파일. 버전 되돌리기에만 쓰고 API 로는 보내지 않는다.
   snapshot?: Record<string, string>
   // 응답 도중 오류로 끊긴 답변. 채팅에서 다시 시도 버튼을 띄운다.
@@ -39,6 +41,8 @@ export interface TokenUsage {
   stopReason?: string
   // 이번 응답에서 실행한 웹 검색 횟수(검색 1회당 $0.01 별도 과금)
   webSearches?: number
+  // 이번 응답의 어드바이저 호출 토큰
+  advisor?: AdvisorUsage[]
   limitPerMin: number
   remainingPerMin: number
   resetInSeconds: number
@@ -60,6 +64,8 @@ export interface AIModel {
   defaultEffort: Effort
   // 빠른 모드(speed: "fast") 지원 시 그 단가. 없으면 빠른 모드를 쓸 수 없다.
   fast?: { inputPerMTok: number; outputPerMTok: number }
+  // 어드바이저로 쓸 수 있는 모델(Anthropic 지원 조합 중 이 앱 모델 목록에 있는 것, 자기 자신 제외)
+  advisors?: string[]
 }
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -81,42 +87,67 @@ export interface ModelOptions {
   maxTokens: number
   // 생각 요약(thinking.display = "summarized")을 받아 답변 전까지 보여준다.
   showThinking: boolean
-  // 웹 검색 도구 사용. 최신 정보가 필요할 때 Claude 가 스스로 검색한다.
+  // ── 도구(사용자가 켜고 끈다) ──
+  // 웹 검색(서버): 최신 정보가 필요할 때 검색. 1회 $0.01
   webSearch: boolean
+  // 웹 페치(서버): 대화에 나온 URL 의 페이지·PDF 를 읽음. 토큰 비용만
+  webFetch: boolean
+  // 코드 실행(서버): 격리된 컨테이너에서 Python·Bash 실행, 결과 파일 다운로드
+  codeExecution: boolean
+  // 메모리(앱): 대화를 넘어 취향·규칙을 기억. 저장은 드라이브/브라우저
+  memory: boolean
+  // 텍스트 에디터(앱): 기존 파일을 통째로 다시 쓰지 않고 부분 수정 → 출력 토큰 절약
+  textEditor: boolean
+  // 어드바이저(서버, 베타): 지정한 상위 모델에 생성 도중 조언을 구함. 없으면 끔
+  advisorModel?: string
 }
 
 export interface WebSource { url: string; title: string; cited: boolean }
 
 /** 웹 검색 1회 요금(USD). Anthropic 가격표: 1,000회당 $10 */
 export const WEB_SEARCH_COST = 0.01
-/** 한 턴에서 허용하는 최대 검색 횟수 */
+/** 한 턴에서 허용하는 최대 검색·페치 횟수 */
 const WEB_SEARCH_MAX_USES = 5
-/** pause_turn(검색이 길어져 서버가 턴을 잠시 멈춤)을 이어 받는 최대 횟수 */
-const MAX_PAUSE_ROUNDS = 4
+const WEB_FETCH_MAX_USES = 5
+/** 한 턴 안에서 요청을 다시 보내는 최대 횟수(pause_turn 이어 받기 + 앱 도구 실행 왕복) */
+const MAX_ROUNDS = 30
+
+/** 앱이 실행하는 도구(메모리·텍스트 에디터)의 결과 */
+export interface ClientToolResult { content: string; isError?: boolean }
 
 /** 스트림 부가 이벤트 */
 export interface StreamHooks {
   // 생각 요약 조각
   onThinking?: (text: string) => void
-  // 웹 검색 시작(검색어)
-  onSearch?: (query: string) => void
-  // 출처(인용·검색 결과)
+  // 도구 진행 상황 한 줄(검색어, 읽는 URL, 실행 중인 명령 등)
+  onActivity?: (text: string) => void
+  // 출처(인용·검색·페치 결과)
   onSource?: (source: WebSource) => void
+  // 코드 실행이 만든 파일(Files API id)
+  onFile?: (fileId: string) => void
+  // 앱 도구 실행. 없으면 앱 도구 호출에서 멈춘다.
+  onClientTool?: (name: string, input: Record<string, unknown>) => Promise<ClientToolResult>
 }
 
+/** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
+export interface AdvisorUsage { model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+
 export const MAX_TOKEN_CHOICES = [16000, 32000, 64000, 128000]
-export const DEFAULT_MODEL_OPTIONS: ModelOptions = { fast: false, maxTokens: 64000, showThinking: false, webSearch: true }
+export const DEFAULT_MODEL_OPTIONS: ModelOptions = {
+  fast: false, maxTokens: 64000, showThinking: false,
+  webSearch: true, webFetch: true, codeExecution: false, memory: false, textEditor: false,
+}
 
 // 첫 항목이 기본 모델이다.
 // 단가 출처: Anthropic 공식 가격표(2026-10 기준). 가격이 바뀌면 여기만 고친다.
 export const MODELS: AIModel[] = [
   // 빠른 모드 단가: Anthropic Fast mode 문서(2026-11)
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2, defaultEffort: 'medium', fast: { inputPerMTok: 8, outputPerMTok: 40 } },
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2, defaultEffort: 'medium', fast: { inputPerMTok: 8, outputPerMTok: 40 }, advisors: ['claude-fable-5-1'] },
   // Fable 5.1: 최상위 모델. 생각(adaptive thinking)이 항상 켜져 있어 첫 글자가 나오기까지 조금 더 걸린다. 생각 블록은 화면에 표시하지 않는다.
-  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, defaultEffort: 'high' },
-  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, defaultEffort: 'high' },
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, defaultEffort: 'high', advisors: [] },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, defaultEffort: 'high', advisors: ['claude-fable-5-1', 'claude-opus-5-5'] },
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
-  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
 ]
 
 const SYSTEM_PROMPT = `You are Vibe Coding AI — an expert frontend developer and product designer who builds multi-file web projects from natural language.
@@ -276,6 +307,13 @@ Vue mode rules:
 - Split into .vue SFC components in src/components/
 - Use ref(), reactive(), computed(), onMounted() as needed
 
+## Tools (only the ones present in this request)
+- str_replace_based_edit_tool: when refining an existing project, edit files with str_replace / insert instead of re-outputting whole files. Paths are the project file names (e.g. "index.html", "src/App.vue"). Use create (or <VIBE_FILE>) only for new files. The current file contents are already in the conversation, so do not call view on them again. Still end with <VIBE_TYPE> and <VIBE_EXPLANATION>.
+- memory: store only durable user preferences (stack, design taste, conventions) in a short, organized file such as /memories/preferences.md. Never store API keys or secrets. Apply what you find there.
+- web_fetch: read a URL the user gave (docs, reference pages, PDFs) before building from it.
+- code_execution: run Python/Bash to analyze data, compute results or verify logic. Files saved to $OUTPUT_DIR are offered to the user for download.
+- advisor: consult it once for hard design/architecture decisions, not for routine edits.
+
 ## Web search
 - A web_search tool may be available. Use it only when the request needs current or external facts: latest library/CDN versions or APIs, official docs, news, prices, or real data to show in the page.
 - Do not search for ordinary coding you can do from knowledge. Keep searches few and focused.
@@ -307,7 +345,10 @@ type ApiBlock =
  * 캐시 지점 ②: 마지막 user 메시지의 마지막 블록. 다음 턴에는 여기까지(시스템 프롬프트 + 이력 + 이미지)가 캐시에서 읽힌다.
  * 화면 전용 필드(files·snapshot·thinking 등)는 보내지 않는다.
  */
-function apiMessages(messages: Message[]): { role: 'user' | 'assistant'; content: string | ApiBlock[] }[] {
+function apiMessages(all: Message[]): { role: 'user' | 'assistant'; content: string | ApiBlock[] }[] {
+  // 오류로 끝난 답변('오류: …')은 모델에 도움이 안 되고 매 턴 토큰만 쓰므로 보내지 않는다.
+  // 그 결과 user 가 연달아 와도 API 가 한 턴으로 합친다.
+  const messages = all.filter((m) => !(m.role === 'assistant' && m.failed))
   const lastUser = messages.map((m) => m.role).lastIndexOf('user')
   return messages.map((m, i) => {
     const blocks: ApiBlock[] = [
@@ -357,8 +398,10 @@ export async function* streamCode(
 
   const info = MODELS.find((m) => m.id === model)
   const fast = options.fast && !!info?.fast
-  // 빠른 모드를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 빠른 모드일 때는 fallback 을 쓰지 않는다.
-  const useFallback = (info?.fallback ?? false) && !fast
+  const { tools, betas } = buildTools(model, options)
+  const advisorOn = betas.includes(ADVISOR_BETA)
+  // 빠른 모드·어드바이저를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 그때는 fallback 을 쓰지 않는다.
+  const useFallback = (info?.fallback ?? false) && !fast && !advisorOn
   const baseMessages = [
     ...apiMessages(messages),
     ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
@@ -375,23 +418,28 @@ export async function* streamCode(
     // 캐시 지점 ①: 고정 시스템 프롬프트
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: baseMessages,
-    // 웹 검색(서버 도구): Anthropic 이 검색을 실행하고 결과를 바로 이어서 답한다. 클라이언트가 할 일은 출처 표시뿐이다.
-    ...(options.webSearch ? { tools: [webSearchTool()] } : {}),
+    // 서버 도구(검색·페치·코드 실행·어드바이저)는 Anthropic 이 실행하고, 앱 도구(메모리·에디터)는 앱이 실행해 결과를 돌려준다.
+    ...(tools.length ? { tools } : {}),
     ...(useFallback ? { fallbacks: 'default' } : {}),
   }
   const body = JSON.stringify(request)
   const headers: Record<string, string> = {
     ...(SERVER_URL ? authHeader(apiKey) : directHeaders(apiKey)),
     'Content-Type': 'application/json',
-    ...(useFallback ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+    ...((useFallback || betas.length) ? { 'anthropic-beta': [...(useFallback ? ['server-side-fallback-2026-07-01'] : []), ...betas].join(',') } : {}),
   }
 
   // 서버가 없으면 브라우저에서 Anthropic 으로 바로 보낸다. 끊기면 이어 받을 곳이 없으므로 오류로 끝난다(다시 시도 버튼).
   if (!SERVER_URL) {
-    // 검색이 길어지면 서버가 stop_reason: pause_turn 으로 턴을 멈춘다. 받은 어시스턴트 내용을 그대로 돌려보내면 이어서 진행한다.
-    const assistantSoFar: unknown[] = []
+    // 한 턴 = 여러 요청일 수 있다.
+    // - pause_turn: 서버 도구가 길어져 턴이 잠시 멈춤 → 받은 어시스턴트 내용을 그대로 돌려보내 이어 받는다.
+    // - tool_use: 앱 도구(메모리·에디터) 호출 → 앱이 실행하고 tool_result 를 user 메시지로 보내 이어 받는다.
+    // 받은 블록은 생각 서명·검색 결과 암호문까지 변경 없이 돌려보내야 한다.
+    type Turn = { role: 'assistant' | 'user'; content: Record<string, unknown>[] }
+    const extra: Turn[] = []
+    let container: string | undefined
     for (let round = 0; ; round++) {
-      const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, { role: 'assistant', content: assistantSoFar }] })
+      const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, ...withTailCache(extra)], ...(container ? { container } : {}) })
       let direct: Response | null = null
       for (let attempt = 0; ; attempt++) {
         direct = await fetch(DIRECT_URL, { method: 'POST', headers, body: reqBody, signal })
@@ -399,11 +447,27 @@ export async function* streamCode(
         await sleep(START_RETRY_DELAYS_MS[attempt], signal)
       }
       let stop: string | undefined
+      let got: Record<string, unknown>[] = []
       yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false, hooks.onThinking, {
         ...hooks,
-        onDone: (blocks, stopReason) => { assistantSoFar.push(...blocks); stop = stopReason },
+        onDone: (blocks, stopReason, containerId) => { got = blocks; stop = stopReason; container = containerId ?? container },
       })
-      if (stop !== 'pause_turn' || round + 1 >= MAX_PAUSE_ROUNDS) return
+      const last = extra[extra.length - 1]
+      if (last?.role === 'assistant') last.content.push(...got)
+      else extra.push({ role: 'assistant', content: [...got] })
+      if (round + 1 >= MAX_ROUNDS) return
+      if (stop === 'pause_turn') continue
+      if (stop !== 'tool_use') return
+      const uses = got.filter((b) => b.type === 'tool_use')
+      if (!uses.length || !hooks.onClientTool) return
+      const results: Record<string, unknown>[] = []
+      for (const u of uses) {
+        signal?.throwIfAborted()
+        const r = await hooks.onClientTool(String(u.name), (u.input as Record<string, unknown>) ?? {})
+          .catch((e: unknown): ClientToolResult => ({ content: `Error: ${e instanceof Error ? e.message : String(e)}`, isError: true }))
+        results.push({ type: 'tool_result', tool_use_id: u.id, content: r.content, ...(r.isError ? { is_error: true } : {}) })
+      }
+      extra.push({ role: 'user', content: results })
     }
   }
 
@@ -420,6 +484,39 @@ export async function* streamCode(
     await sleep(START_RETRY_DELAYS_MS[attempt], signal)
   }
   yield* readGeneration(apiKey, generationId, res, onUsage, signal, true, hooks.onThinking, hooks)
+}
+
+/**
+ * 도구 왕복 중 쌓인 메시지의 마지막 tool_result 에 캐시 지점을 둔다(왕복할수록 길어지는 앞부분을 캐시로 읽게).
+ * 캐시 지점은 최대 4개: 시스템 프롬프트, 마지막 user 메시지, 그리고 이것.
+ */
+function withTailCache(extra: { role: string; content: Record<string, unknown>[] }[]) {
+  const out = extra.map((m) => ({ ...m, content: [...m.content] }))
+  const last = out[out.length - 1]
+  const tail = last?.content[last.content.length - 1]
+  if (last?.role === 'user' && tail?.type === 'tool_result') last.content[last.content.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } }
+  return out
+}
+
+const ADVISOR_BETA = 'advisor-tool-2026-03-01'
+
+/** 옵션에 따라 도구 목록과 필요한 베타 헤더를 만든다. */
+export function buildTools(model: string, options: ModelOptions): { tools: Record<string, unknown>[]; betas: string[] } {
+  const tools: Record<string, unknown>[] = []
+  const betas: string[] = []
+  if (options.webSearch) tools.push(webSearchTool())
+  // citations 를 켜야 페치한 문서 인용이 출처로 나온다. 큰 페이지 비용을 막으려고 본문을 3만 토큰으로 제한한다.
+  if (options.webFetch) tools.push({ type: 'web_fetch_20250910', name: 'web_fetch', max_uses: WEB_FETCH_MAX_USES, citations: { enabled: true }, max_content_tokens: 30_000 })
+  if (options.codeExecution) tools.push({ type: 'code_execution_20250825', name: 'code_execution' })
+  const info = MODELS.find((m) => m.id === model)
+  if (options.advisorModel && info?.advisors?.includes(options.advisorModel)) {
+    // 조언 1회 출력(생각 포함)을 4K 로 제한해 비용을 묶는다. 한 턴 최대 3회.
+    tools.push({ type: 'advisor_20260301', name: 'advisor', model: options.advisorModel, max_uses: 3, max_tokens: 4096 })
+    betas.push(ADVISOR_BETA)
+  }
+  if (options.memory) tools.push({ type: 'memory_20250818', name: 'memory' })
+  if (options.textEditor) tools.push({ type: 'text_editor_20250728', name: 'str_replace_based_edit_tool', max_characters: 20_000 })
+  return { tools, betas }
 }
 
 /** 웹 검색 도구 정의. 결과를 사용자 위치(시간대)에 맞추도록 대략적인 위치를 준다. */
@@ -461,6 +558,20 @@ const START_RETRY_DELAYS_MS = [1000, 3000]
 class GenerationError extends Error {}
 
 const DIRECT_URL = 'https://api.anthropic.com/v1/messages'
+const FILES_URL = 'https://api.anthropic.com/v1/files'
+const FILES_BETA = 'files-api-2025-04-14'
+
+/** 코드 실행이 만든 파일을 Files API 로 받는다(이름은 메타데이터에서). */
+export async function downloadOutputFile(fileId: string): Promise<{ name: string; blob: Blob }> {
+  const apiKey = (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined)?.trim() || localStorage.getItem('vibe_api_key_anthropic') || ''
+  const headers = { ...directHeaders(apiKey), 'anthropic-beta': FILES_BETA }
+  const meta = await fetch(`${FILES_URL}/${encodeURIComponent(fileId)}`, { headers })
+  if (!meta.ok) throw new Error(meta.status === 404 ? '파일이 만료됐거나 없습니다' : `파일 정보 HTTP ${meta.status}`)
+  const { filename } = (await meta.json()) as { filename?: string }
+  const res = await fetch(`${FILES_URL}/${encodeURIComponent(fileId)}/content`, { headers })
+  if (!res.ok) throw new Error(`파일 받기 HTTP ${res.status}`)
+  return { name: filename || fileId, blob: await res.blob() }
+}
 
 /** 브라우저에서 Anthropic API 를 직접 부를 때의 헤더. 키는 이 브라우저(localStorage)에만 있다. */
 function directHeaders(apiKey: string): Record<string, string> {
@@ -517,7 +628,7 @@ async function* readGeneration(
   // false 면 끊겨도 다시 요청하지 않는다(서버 없이 Anthropic 을 직접 부를 때).
   canResume = true,
   onThinking?: (text: string) => void,
-  hooks: StreamHooks & { onDone?: (blocks: unknown[], stopReason: string | undefined) => void } = {},
+  hooks: StreamHooks & { onDone?: (blocks: Record<string, unknown>[], stopReason: string | undefined, container: string | undefined) => void } = {},
 ): AsyncGenerator<string, void, unknown> {
   const decoder = new TextDecoder()
   // 이번 응답의 콘텐츠 블록을 그대로 모은다(pause_turn 때 변경 없이 돌려보내야 한다: 생각 서명·검색 결과 암호문 포함).
@@ -525,6 +636,8 @@ async function* readGeneration(
   const blocks: Block[] = []
   const partialJson: Record<number, string> = {}
   let webSearches = 0
+  let container: string | undefined
+  let advisor: AdvisorUsage[] = []
   let buffer = ''
   let received = 0
   let failures = 0
@@ -554,12 +667,8 @@ async function* readGeneration(
           if (event.type === 'content_block_start') {
             const block = { ...event.content_block } as Block
             blocks[event.index] = block
-            if (block.type === 'server_tool_use') partialJson[event.index] = ''
-            if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
-              for (const r of block.content as { type: string; url?: string; title?: string }[]) {
-                if (r.type === 'web_search_result' && r.url) hooks.onSource?.({ url: r.url, title: r.title || r.url, cited: false })
-              }
-            }
+            if (block.type === 'server_tool_use' || block.type === 'tool_use') partialJson[event.index] = ''
+            reportResultBlock(block, hooks)
             for (const c of (block.citations as Citation[] | undefined) ?? []) reportCitation(c, hooks)
           } else if (event.type === 'content_block_delta') {
             const block = blocks[event.index]
@@ -582,26 +691,31 @@ async function* readGeneration(
             const block = blocks[event.index]
             if (block && event.index in partialJson) {
               try { block.input = JSON.parse(partialJson[event.index] || '{}') } catch { block.input = {} }
-              const query = (block.input as { query?: string }).query
-              if (block.name === 'web_search' && query) hooks.onSearch?.(query)
+              const line = activityLine(String(block.name), block.input as Record<string, unknown>)
+              if (line) hooks.onActivity?.(line)
             }
           } else if (event.type === 'message_start') {
+            container = event.message.container?.id ?? container
             Object.assign(usage, definedNumbers(event.message.usage))
             speed = event.message.usage?.speed ?? speed
           } else if (event.type === 'message_delta') {
             Object.assign(usage, definedNumbers(event.usage))
             speed = event.usage?.speed ?? speed
             webSearches = event.usage?.server_tool_use?.web_search_requests ?? webSearches
+            container = event.delta?.container?.id ?? container
+            if (Array.isArray(event.usage?.iterations)) advisor = advisorUsage(event.usage.iterations)
             stopReason = event.delta.stop_reason ?? stopReason
             stopExplanation = event.delta.stop_details?.explanation ?? stopExplanation
           } else if (event.type === 'error') throw new GenerationError(event.error?.message ?? '생성 중 오류가 발생했습니다')
           else if (event.type === 'message_stop') {
-            reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast', webSearches)
-            hooks.onDone?.(blocks.filter(Boolean), stopReason)
+            reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast', webSearches, advisor)
+            hooks.onDone?.(blocks.filter(Boolean), stopReason, container)
             return
           }
         }
       }
+      // 끝 신호(message_stop) 없이 스트림이 닫혔다. 서버 없이 직접 부르는 방식은 이어 받을 곳이 없으므로 바로 알린다.
+      if (!canResume) throw new GenerationError('응답이 중간에 끊겼습니다. 다시 시도해 주세요')
     } catch (e) {
       if (signal?.aborted || e instanceof GenerationError || !canResume) throw e
       lost = e
@@ -620,11 +734,58 @@ function definedNumbers(obj: Record<string, unknown> | undefined): Record<string
 }
 
 type Citation = { type?: string; url?: string; title?: string }
+
+/** 결과 블록에서 출처·생성 파일을 뽑는다. */
+function reportResultBlock(block: Record<string, unknown>, hooks: StreamHooks) {
+  const c = block.content as Record<string, unknown> | Record<string, unknown>[] | undefined
+  if (block.type === 'web_search_tool_result' && Array.isArray(c)) {
+    for (const r of c as { type: string; url?: string; title?: string }[]) {
+      if (r.type === 'web_search_result' && r.url) hooks.onSource?.({ url: r.url, title: r.title || r.url, cited: false })
+    }
+  } else if (block.type === 'web_fetch_tool_result' && c && !Array.isArray(c) && c.type === 'web_fetch_result') {
+    const doc = c.content as { title?: string } | undefined
+    if (typeof c.url === 'string') hooks.onSource?.({ url: c.url, title: doc?.title || c.url, cited: false })
+  } else if (block.type === 'bash_code_execution_tool_result' && c && !Array.isArray(c) && Array.isArray(c.content)) {
+    for (const f of c.content as { file_id?: string }[]) if (f.file_id) hooks.onFile?.(f.file_id)
+  }
+}
+
+/** 도구 호출을 사람이 읽는 한 줄로 */
+function activityLine(name: string, input: Record<string, unknown>): string {
+  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
+  const short = (t: string, n = 60) => (t.length > n ? `${t.slice(0, n)}…` : t)
+  const cmd = str('command')
+  switch (name) {
+    case 'web_search': return `🔎 "${str('query')}" 검색 중…`
+    case 'web_fetch': return `🌐 ${short(str('url'), 80)} 읽는 중…`
+    case 'bash_code_execution': return `⚙️ 실행: ${short(cmd.split('\n')[0])}`
+    case 'text_editor_code_execution': return `⚙️ 샌드박스 파일 ${cmd}: ${short(str('path'))}`
+    case 'code_execution': return '⚙️ 코드 실행 중…'
+    case 'advisor': return '🧠 상위 모델에 조언 요청 중…'
+    case 'memory': return `💾 기억 ${({ view: '확인', create: '저장', str_replace: '수정', insert: '추가', delete: '삭제', rename: '이름 변경' } as Record<string, string>)[cmd] ?? cmd}: ${short(str('path') || str('old_path'))}`
+    case 'str_replace_based_edit_tool': return `✏️ ${short(str('path'))} ${({ view: '보는 중', str_replace: '수정', create: '생성', insert: '추가' } as Record<string, string>)[cmd] ?? cmd}`
+    default: return ''
+  }
+}
+
+/** usage.iterations 에서 어드바이저 호출 토큰만 */
+function advisorUsage(iterations: Record<string, unknown>[]): AdvisorUsage[] {
+  const n = (v: unknown) => (typeof v === 'number' ? v : 0)
+  return iterations
+    .filter((it) => it.type === 'advisor_message' && typeof it.model === 'string')
+    .map((it) => ({
+      model: String(it.model),
+      inputTokens: n(it.input_tokens) + n(it.cache_read_input_tokens) + n(it.cache_creation_input_tokens),
+      outputTokens: n(it.output_tokens),
+      cacheReadTokens: n(it.cache_read_input_tokens),
+      cacheWriteTokens: n(it.cache_creation_input_tokens),
+    }))
+}
 function reportCitation(c: Citation, hooks: StreamHooks) {
   if (c?.url) hooks.onSource?.({ url: c.url, title: c.title || c.url, cited: true })
 }
 
-function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void, fast = false, webSearches = 0) {
+function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void, fast = false, webSearches = 0, advisor: AdvisorUsage[] = []) {
   if (stopReason === 'refusal') {
     throw new GenerationError(explanation ? `Claude가 요청을 거절했습니다: ${explanation}` : 'Claude가 요청을 거절했습니다')
   }
@@ -642,6 +803,7 @@ function reportUsage(usage: Record<string, number>, stopReason: string | undefin
     fast,
     stopReason,
     webSearches,
+    ...(advisor.length ? { advisor } : {}),
     // Anthropic rate limit 헤더는 서버가 전달하지 않으므로 -1(표시 안 함)로 둔다.
     limitPerMin: -1,
     remainingPerMin: -1,
