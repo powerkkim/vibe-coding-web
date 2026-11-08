@@ -15,7 +15,11 @@ import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
-import { exportProject, FileScopeError, importPicked, isPickerConfigured, listFolder, pickDriveFile, readFromProject, saveToProject } from './services/driveExport'
+import ProjectModal from './components/ProjectModal'
+import { loadProjects, newProject, projectContext, saveProjects } from './services/projectStore'
+import type { Project } from './services/projectStore'
+import { bindChatProject, exportProject, FileScopeError, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
+import type { PickerDoc } from './services/driveExport'
 import { downloadOutputFile } from './services/ai'
 import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
@@ -27,7 +31,7 @@ import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
 import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
-import type { ClientToolResult, ModelOptions, WebSource } from './services/ai'
+import type { ClientToolResult, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
@@ -118,7 +122,7 @@ const APP_TOOLS: Record<string, unknown>[] = [
     input_schema: {
       type: 'object',
       properties: {
-        command: { type: 'string', enum: ['save_project', 'save_text', 'save_outputs', 'list', 'read', 'pick'], description: 'save_project: save all current project files now; save_text: save `content` as file `path`; save_outputs: save files produced by code execution in this chat; list: list the project folder (or the Vibe Coding root when scope is "root"); read: read file `path` from the project folder; pick: open the Google file picker so the user can choose an existing Drive file, which is COPIED into the project folder (imports/) and, if text, added to the project files for editing (the original is never modified)' },
+        command: { type: 'string', enum: ['save_project', 'save_text', 'save_outputs', 'list', 'read', 'pick', 'read_attachment', 'copy_to_project'], description: 'save_project: save all current project files now; save_text: save `content` as file `path`; save_outputs: save files produced by code execution in this chat; list: list the project folder (or the Vibe Coding root when scope is "root"); read: read file `path` from the project folder; pick: open the Google file picker and read a text file the user chooses; read_attachment: read a large attached Drive file by name (`path` = attachment name) when you actually need its content; copy_to_project: copy an attached Drive file into the project folder (imports/) and make it an editable project file — only when the user wants to edit or reuse it (the original is never modified)' },
         path: { type: 'string', description: 'File path for save_text/read, e.g. "report.md" or "imports/notes.txt"' },
         content: { type: 'string', description: 'Text content for save_text' },
         scope: { type: 'string', enum: ['project', 'root'], description: 'For list' },
@@ -339,6 +343,9 @@ export default function App() {
   useEffect(() => { chatCacheRef.current.clear() }, [driveConnected])
 
   useEffect(() => {
+    loadProjects().then(setProjects).catch(() => {})
+  }, [driveConnected])
+  useEffect(() => {
     if (!storageReady) return
     listChats(activeApiKey).then(setChats).catch(storageFailMessage('대화 목록을 불러오지 못했습니다'))
   }, [activeApiKey, storageReady, driveConnected])
@@ -370,19 +377,80 @@ export default function App() {
       projectFiles,
       projectType,
       githubRepo,
+      projectId: chatProjectIdRef.current,
     }
     chatCacheRef.current.set(chat.id, chat)
     const where = await saveChat(activeApiKey, chat)
     // 연결된 상태인데 브라우저에 저장됐다 = 드라이브 저장이 실패해 대기 저장으로 돌린 것
     setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
-    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, projectId: chat.projectId, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+  }
+
+  // ── 프로젝트 ───────────────────────────────────────────────
+  const [projects, setProjects] = useState<Project[]>([])
+  // 지금 대화가 속한 프로젝트(새 대화면 '프로젝트에서 새 대화'로 정해진다). 저장·요청에서 바로 읽도록 ref 도 둔다.
+  const [chatProjectId, setChatProjectIdState] = useState<string | null>(null)
+  const chatProjectIdRef = useRef<string | null>(null)
+  const setChatProjectId = (pid: string | null) => { chatProjectIdRef.current = pid; setChatProjectIdState(pid) }
+  const [projectModal, setProjectModal] = useState<Project | 'new' | null>(null)
+  const currentProject = projects.find((p) => p.id === chatProjectId)
+  const updateProjects = (next: Project[]) => {
+    setProjects(next)
+    saveProjects(next).catch(() => {})
+  }
+  const handleSaveProject = (p: Project) => {
+    const exists = projects.some((x) => x.id === p.id)
+    const prev = projects.find((x) => x.id === p.id)
+    updateProjects(exists ? projects.map((x) => (x.id === p.id ? p : x)) : [p, ...projects])
+    if (prev && prev.name !== p.name) renameProjectFolder(p).catch(() => {})
+    setProjectModal(null)
+  }
+  /** 프로젝트 삭제: 대화는 지우지 않고 프로젝트 밖으로 꺼낸다(드라이브 폴더도 그대로). */
+  const handleDeleteProject = (p: Project) => {
+    updateProjects(projects.filter((x) => x.id !== p.id))
+    if (chatProjectId === p.id) setChatProjectId(null)
+    setProjectModal(null)
+  }
+  /** 프로젝트 안에서 새 대화 */
+  const handleNewChatInProject = (pid: string) => {
+    if (isLoading) return
+    resetConversation()
+    setChatId(null)
+    setChatProjectId(pid)
+    setMobileTab('chat')
+    if (isMobile) setSidebarOpen(false)
+  }
+  /** 대화를 다른 프로젝트로 옮기거나(pid) 프로젝트에서 뺀다(null). */
+  const handleMoveChat = async (id: string, pid: string | null) => {
+    try {
+      const chat = id === chatId
+        ? null
+        : chatCacheRef.current.get(id) ?? await loadChat(activeApiKey, id)
+      if (id === chatId) {
+        setChatProjectId(pid)
+        bindChatProject(id, projects.find((p) => p.id === pid))
+        if (isDriveConnected()) moveChatFolder(id).catch(() => {})
+        unsavedRef.current = true
+        setChats((prev) => prev.map((c) => (c.id === id ? { ...c, projectId: pid } : c)))
+        return
+      }
+      if (!chat) return
+      const moved = { ...chat, projectId: pid }
+      chatCacheRef.current.set(id, moved)
+      bindChatProject(id, projects.find((p) => p.id === pid))
+      if (isDriveConnected()) moveChatFolder(id).catch(() => {})
+      await saveChat(activeApiKey, moved)
+      setChats((prev) => prev.map((c) => (c.id === id ? { ...c, projectId: pid } : c)))
+    } catch (e) {
+      storageFailMessage('대화를 옮기지 못했습니다')(e)
+    }
   }
 
   // 저장 대기(0.5초) 중에 탭을 닫으면 그 내용을 브라우저에 대기 저장해 둔다.
   useEffect(() => {
     const onHide = () => {
       if (!chatId || messages.length === 0 || !unsavedRef.current) return
-      savePendingNow({ id: chatId, title: chatTitle(messages), createdAt: chatCreatedAtRef.current, updatedAt: Date.now(), messages, projectFiles, projectType, githubRepo })
+      savePendingNow({ id: chatId, title: chatTitle(messages), createdAt: chatCreatedAtRef.current, updatedAt: Date.now(), messages, projectFiles, projectType, githubRepo, projectId: chatProjectIdRef.current })
     }
     window.addEventListener('pagehide', onHide)
     return () => window.removeEventListener('pagehide', onHide)
@@ -510,39 +578,15 @@ export default function App() {
   const outputFilesRef = useRef<string[]>([])
   // 텍스트 에디터로 이번 턴에 바뀐 파일
   const editedRef = useRef(new Set<string>())
-  const [importNotice, setImportNotice] = useState('')
-  /**
-   * 드라이브 파일 가져오기(A안): 선택창에서 고른 파일을 프로젝트 폴더 imports/ 로 복사하고,
-   * 텍스트 파일이면 프로젝트 파일에도 넣는다 → Claude 가 읽고 고칠 수 있고, 고친 내용은 자동 저장으로 사본에 저장된다. 원본은 그대로.
-   */
-  const importFromDrive = async (): Promise<string> => {
+  /** 드라이브 파일 첨부: 선택창에서 고른 파일 정보만 돌려준다(내용은 보낼 때 받는다, 폴더도 만들지 않는다). */
+  const pickForAttachment = async (): Promise<PickerDoc | null> => {
     if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
     if (!hasFileScope()) { setDriveModal('scope'); throw new Error('드라이브 파일 권한 추가가 필요해요') }
-    const picked = await pickDriveFile()
-    if (!picked) return 'The user cancelled the file picker.'
-    const id = genChatIdRef.current ?? chatId ?? crypto.randomUUID()
-    if (!chatId && !genChatIdRef.current) { genChatIdRef.current = id; setChatId(id); chatCreatedAtRef.current = Date.now() }
-    const title = messages.length ? chatTitle(messages) : picked.name
-    const r = await importPicked(id, title, picked)
-    if (r.text !== undefined) {
-      const next = { ...projectFilesRef.current, [r.path]: r.text }
-      baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
-      projectFilesRef.current = next
-      setProjectFiles(next)
-      unsavedRef.current = true
-    }
-    const msg = r.text !== undefined
-      ? `"${r.source}"을(를) 프로젝트 폴더에 ${r.path} 로 복사했어요. 원본은 그대로이고, 이 사본을 고쳐서 저장합니다.`
-      : `"${r.source}"을(를) ${r.path} 로 복사했어요(${Math.round(r.size / 1024)}KB). 텍스트가 아니거나 커서 대화에는 넣지 않았어요.`
-    setImportNotice(msg)
-    return r.text !== undefined
-      ? `Copied "${r.source}" into the project folder as ${r.path}; it is now one of the current project files (edit that path; the original stays untouched).`
-      : `Copied "${r.source}" into the project folder as ${r.path} (${r.size} bytes). It is binary or too large, so its content was not added to the conversation.`
+    return pickDriveFile()
   }
-  const handleImportClick = () => {
-    setImportNotice('')
-    importFromDrive().catch((e) => setImportNotice(e instanceof Error ? e.message : '가져오지 못했습니다'))
-  }
+  /** 대화에 첨부된 문서 중 이름이 맞는 것(가장 최근) */
+  const findDoc = (name: string): MessageDoc | undefined =>
+    [...messages].reverse().flatMap((m) => m.docs ?? []).find((d) => d.name === name || d.name.startsWith(name))
 
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
   const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
@@ -572,7 +616,31 @@ export default function App() {
       if (cmd === 'pick') {
         // 선택창 설정이 빠졌을 때 '관리자에게 요청하라' 대신 빠진 설정을 정확히 안내하게 한다(이 앱은 보통 사용자 본인이 운영한다).
         if (!isPickerConfigured()) return { content: 'The Google file picker is not set up in this deployment yet, so existing Drive files cannot be picked. The user is most likely the app owner; tell them exactly what is missing: (1) enable "Google Picker API" in Google Cloud Console, (2) create an API key restricted to the website https://powerkkim.github.io/* and to Google Picker API, (3) add GitHub repository Variables GOOGLE_API_KEY (that key) and GOOGLE_APP_ID (the Cloud project number), (4) re-run the "Deploy to GitHub Pages" workflow. Files already in the Vibe Coding folder can still be read with the read command.', isError: true }
-        return { content: await importFromDrive() }
+        const picked = await pickForAttachment()
+        if (!picked) return { content: 'The user cancelled the file picker.' }
+        const { doc } = await loadAttachment(picked).catch((e: unknown) => { throw e })
+        if (doc?.kind === 'text') return { content: `Picked "${doc.name}":\n${(doc.text ?? '').slice(0, 30_000)}` }
+        return { content: `Picked "${picked.name}". PDFs, images and large files must be attached with the Drive button in the message box so they are sent with the message; ask the user to attach it there.` }
+      }
+      if (cmd === 'read_attachment') {
+        const d = findDoc(String(input.path ?? input.name ?? ''))
+        if (!d) return { content: 'No attachment with that name in this chat.', isError: true }
+        return { content: await readAttachmentText(d) }
+      }
+      if (cmd === 'copy_to_project') {
+        // A안: 첨부한 드라이브 파일을 프로젝트 폴더 imports/ 로 복사하고(원본은 그대로) 텍스트면 프로젝트 파일에 넣어 고칠 수 있게 한다.
+        const d = findDoc(String(input.path ?? input.name ?? ''))
+        if (!d?.driveId) return { content: 'No Drive attachment with that name in this chat.', isError: true }
+        const r = await importPicked(id, title, { id: d.driveId, name: d.name, mimeType: d.mimeType })
+        if (r.text !== undefined) {
+          const next = { ...projectFilesRef.current, [r.path]: r.text }
+          baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
+          projectFilesRef.current = next
+          setProjectFiles(next)
+          unsavedRef.current = true
+          return { content: `Copied "${d.name}" into the project folder as ${r.path}; it is now a project file you can edit (the original is untouched).` }
+        }
+        return { content: `Copied "${d.name}" into the project folder as ${r.path} (binary, so it is not editable as text).` }
       }
       if (cmd === 'save_project') {
         const r = await exportProject(id, title, projectFilesRef.current)
@@ -672,16 +740,31 @@ export default function App() {
     handleSend(next.prompt, next.images)
   }, [isLoading])
 
-  const handleSend = async (prompt: string, images: MessageImage[] = [], base: Message[] = messages) => {
+  const [attachError, setAttachError] = useState('')
+  const handleSend = async (prompt: string, images: MessageImage[] = [], base: Message[] = messages, driveFiles: PickerDoc[] = []) => {
     if (!activeApiKey) return
     if (isLoading) return handleInterrupt(prompt, images)
+    // 드라이브 첨부는 보낼 때 내용을 받는다: 이미지는 사진 첨부와 같게, PDF·문서는 문서 블록으로 이 메시지에 싣는다.
+    let docs: MessageDoc[] = []
+    if (driveFiles.length) {
+      setAttachError('')
+      try {
+        const loaded = await Promise.all(driveFiles.map(loadAttachment))
+        images = [...images, ...loaded.flatMap((l) => (l.image ? [l.image] : []))]
+        docs = loaded.flatMap((l) => (l.doc ? [l.doc] : []))
+      } catch (e) {
+        setAttachError(e instanceof Error ? e.message : '첨부 파일을 받지 못했어요')
+        return
+      }
+    }
     // 새 요청의 결과물을 바로 보도록 닫아 둔 캔버스를 다시 연다.
     setCanvasClosed(false)
     // 이미지만 보내고 글을 비우면 기본 요청을 넣는다. API 는 빈 텍스트 블록을 받지 않는다.
     const userMsg: Message = {
       role: 'user',
-      content: prompt || IMAGE_ONLY_PROMPT,
+      content: prompt || (docs.length ? '첨부한 파일을 확인해 줘.' : IMAGE_ONLY_PROMPT),
       ...(images.length > 0 ? { images } : {}),
+      ...(docs.length > 0 ? { docs } : {}),
     }
     const history = [...base, userMsg]
     const generationId = crypto.randomUUID()
@@ -735,7 +818,7 @@ export default function App() {
       backupChat({
         id: backupId, title: chatTitle(history), createdAt: chatCreatedAtRef.current || Date.now(), updatedAt: Date.now(),
         messages: [...history, { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
-        projectFiles: prevFiles, projectType: prevType, githubRepo,
+        projectFiles: prevFiles, projectType: prevType, githubRepo, projectId: chatProjectIdRef.current,
       })
     }
     const controller = new AbortController()
@@ -756,6 +839,7 @@ export default function App() {
             onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
             onClientTool: runClientTool,
             appTools: APP_TOOLS,
+            projectContext: projectContext(projects.find((p) => p.id === chatProjectIdRef.current)),
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
@@ -898,6 +982,7 @@ export default function App() {
         return updated
       })
       // 프로젝트 파일 자동 저장(내 드라이브). 응답을 막지 않도록 뒤에서 처리한다.
+      if (backupId) bindChatProject(backupId, projects.find((p) => p.id === chatProjectIdRef.current))
       if (USE_DRIVE && driveAutoSave && Object.keys(files).length > 0 && backupId && isDriveConnected()) {
         if (hasFileScope()) {
           exportProject(backupId, chatTitle(history), projectFilesRef.current)
@@ -1011,6 +1096,7 @@ export default function App() {
     if (isLoading) return
     resetConversation()
     setChatId(null)
+    setChatProjectId(null)
     setMobileTab('chat')
     if (isMobile) setSidebarOpen(false)
   }
@@ -1028,6 +1114,8 @@ export default function App() {
       resetConversation()
       setDriveFolderUrl(null)
       setChatId(chat.id)
+      setChatProjectId(chat.projectId ?? null)
+      bindChatProject(chat.id, projects.find((p) => p.id === chat.projectId))
       chatCreatedAtRef.current = chat.createdAt
       setMessages(chat.messages)
       projectFilesRef.current = chat.projectFiles
@@ -1110,6 +1198,12 @@ export default function App() {
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
+      projects={projects}
+      activeProjectId={chatProjectId}
+      onNewProject={() => setProjectModal('new')}
+      onEditProject={(p) => setProjectModal(p)}
+      onNewChatInProject={handleNewChatInProject}
+      onMoveChat={handleMoveChat}
       onDelete={handleDeleteChat}
       onClose={toggleSidebar}
       drive={USE_DRIVE ? { autoSave: driveAutoSave, onAutoSave: toggleDriveAutoSave, folderUrl: driveFolderUrl, configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
@@ -1158,12 +1252,14 @@ export default function App() {
           <div className="flex flex-1 min-h-0">
           <ChatPanel
             messages={messages}
-            onSend={handleSend}
+            onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
+            attachError={attachError}
+            projectName={currentProject?.name}
+            onOpenProject={() => currentProject && setProjectModal(currentProject)}
             onStop={handleStop}
             onRetry={handleRetry}
             onContinue={handleContinue}
-            onImportFromDrive={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? handleImportClick : undefined}
-            importNotice={importNotice}
+            onPickDriveFile={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? pickForAttachment : undefined}
             onSaveOutputToDrive={USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
               if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
               if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }
@@ -1224,6 +1320,17 @@ export default function App() {
           />
         </div>
       </div>
+      {projectModal && (
+        <ProjectModal
+          project={projectModal === 'new' ? newProject('') : projectModal}
+          isNew={projectModal === 'new'}
+          chatCount={projectModal === 'new' ? 0 : chats.filter((c) => c.projectId === projectModal.id).length}
+          onPickKnowledge={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? pickForAttachment : undefined}
+          onSave={handleSaveProject}
+          onDelete={handleDeleteProject}
+          onClose={() => setProjectModal(null)}
+        />
+      )}
       {driveModal && (driveModal === 'scope' ? !hasFileScope() : !driveConnected) && (
         <DriveConnectModal mode={driveModal} busy={driveBusy} error={driveModalError} onConnect={connectFromModal} onClose={closeDriveModal} />
       )}

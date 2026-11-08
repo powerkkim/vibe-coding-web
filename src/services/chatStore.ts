@@ -25,11 +25,14 @@ export interface StoredChat {
   projectType: 'html' | 'react' | 'vue'
   // 이 대화가 import·export 로 연결한 저장소. 이 필드가 생기기 전에 저장된 대화에는 없다.
   githubRepo?: GithubRepo | null
+  // 속한 프로젝트(projectStore). 없으면 프로젝트 밖 대화
+  projectId?: string | null
 }
 
 export type GithubRepo = { owner: string; repo: string; branch: string }
 
-export type ChatSummary = Pick<StoredChat, 'id' | 'title' | 'updatedAt'>
+export type ChatSummary = Pick<StoredChat, 'id' | 'title' | 'updatedAt'> & { projectId?: string | null }
+const summary = (c: StoredChat): ChatSummary => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, ...(c.projectId ? { projectId: c.projectId } : {}) })
 
 export const SERVER_URL = import.meta.env.VITE_CHAT_SERVER_URL
 
@@ -99,7 +102,7 @@ async function driveList(): Promise<ChatSummary[]> {
     const updatedAt = Number(f.appProperties?.updatedAt ?? 0) || Date.parse(f.modifiedTime ?? '') || 0
     const prev = best.get(id)
     if (prev && prev.updatedAt >= updatedAt) continue
-    best.set(id, { id, title: f.appProperties?.title ?? '', updatedAt })
+    best.set(id, { id, title: f.appProperties?.title ?? '', updatedAt, ...(f.appProperties?.projectId ? { projectId: f.appProperties.projectId } : {}) })
     driveIds.set(id, f.id)
   }
   const list = [...best.values()].sort(byRecent)
@@ -114,10 +117,11 @@ async function driveId(id: string): Promise<string | undefined> {
 
 async function driveSave(chat: StoredChat) {
   // appProperties 는 키+값 124바이트 한도라 제목을 짧게 자른다.
-  const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt) }
+  // projectId 는 목록에서 프로젝트별로 묶기 위해 함께 둔다(빈 값이면 프로젝트 밖).
+  const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt), projectId: chat.projectId ?? '' }
   const fid = await writeFile(fileName(chat.id), JSON.stringify(chat), props, await driveId(chat.id))
   driveIds.set(chat.id, fid)
-  updateListCache((l) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt }, ...l.filter((c) => c.id !== chat.id)])
+  updateListCache((l) => [summary(chat), ...l.filter((c) => c.id !== chat.id)])
 }
 
 /** 브라우저에 대기 중인 대화를 드라이브로 올린다. 드라이브 쪽이 더 최신이면 올리지 않고 브라우저 사본만 지운다. */
@@ -130,7 +134,7 @@ async function syncPending(remote: ChatSummary[]): Promise<ChatSummary[]> {
     const r = remoteById.get(chat.id)
     if (!r || chat.updatedAt > r.updatedAt) {
       await driveSave(chat)
-      remoteById.set(chat.id, { id: chat.id, title: chat.title, updatedAt: chat.updatedAt })
+      remoteById.set(chat.id, summary(chat))
     }
     await backupChat(chat, true)
     await localDelete(chat.id)
@@ -159,7 +163,7 @@ async function recoverFromBackup(remote: ChatSummary[]): Promise<ChatSummary[]> 
     try {
       await driveSave(b)
       await backupChat(b, true)
-      byId.set(b.id, { id: b.id, title: b.title, updatedAt: Math.max(b.updatedAt, r?.updatedAt ?? 0) })
+      byId.set(b.id, { ...summary(b), updatedAt: Math.max(b.updatedAt, r?.updatedAt ?? 0) })
       changed = true
     } catch { /* 다음에 다시 시도 */ }
   }
@@ -174,7 +178,7 @@ export async function listChats(apiKey: string): Promise<ChatListItem[]> {
   if (USE_DRIVE) {
     if (!usingLocal()) return recoverFromBackup(await syncPending(await driveList()))
     // 연결 전·만료: 대기 중(브라우저) + 마지막으로 본 드라이브 목록
-    const pending = (await localGetAll<LocalCopy>()).filter(sameAccount).map(({ id, title, updatedAt }) => ({ id, title, updatedAt, pending: true }))
+    const pending = (await localGetAll<LocalCopy>()).filter(sameAccount).map((c) => ({ ...summary(c), pending: true }))
     const ids = new Set(pending.map((c) => c.id))
     // 백업에 있는 대화는 연결 없이도 열 수 있으므로 '드라이브에만 있음'으로 흐리게 두지 않는다.
     const backups = (await backupGetAll<LocalCopy>().catch(() => [] as LocalCopy[])).filter(sameAccount)
@@ -184,7 +188,7 @@ export async function listChats(apiKey: string): Promise<ChatListItem[]> {
       return b ? { id: c.id, title: b.title, updatedAt: Math.max(c.updatedAt, b.updatedAt) } : { ...c, driveOnly: true }
     })
     const cachedIds = new Set(cached.map((c) => c.id))
-    const backupOnly = backups.filter((b) => !ids.has(b.id) && !cachedIds.has(b.id)).map(({ id, title, updatedAt }) => ({ id, title, updatedAt }))
+    const backupOnly = backups.filter((b) => !ids.has(b.id) && !cachedIds.has(b.id)).map(summary)
     return [...pending, ...cached, ...backupOnly].sort(byRecent)
   }
   return (await request(apiKey, '/chats')).json()

@@ -1,4 +1,6 @@
-import { Plus, Trash2, MessageSquare, PanelLeft, Loader2, GoogleDrive } from '../icons'
+import { useEffect, useState } from 'react'
+import { Plus, Trash2, MessageSquare, PanelLeft, Loader2, GoogleDrive, FolderGit2, ChevronDown, ChevronRight, Ellipsis, SlidersHorizontal } from '../icons'
+import type { Project } from '../services/projectStore'
 import type { ChatListItem as ChatSummary } from '../services/chatStore'
 
 /**
@@ -18,6 +20,13 @@ interface Props {
   onNew: () => void
   onDelete: (id: string) => void
   onClose: () => void
+  // 프로젝트: 목록·지금 대화의 프로젝트·만들기·설정·프로젝트 안 새 대화·대화 옮기기
+  projects: Project[]
+  activeProjectId: string | null
+  onNewProject: () => void
+  onEditProject: (p: Project) => void
+  onNewChatInProject: (projectId: string) => void
+  onMoveChat: (chatId: string, projectId: string | null) => void
   // 대화를 Google 드라이브에 저장할 때만 넘긴다.
   drive?: { configured: boolean; connected: boolean; expired: boolean; account?: string; busy: boolean; onConnect: () => void; onDisconnect: () => void
     // 프로젝트 파일 자동 저장(내 드라이브 Vibe Coding 폴더)과 지금 대화의 폴더 주소
@@ -33,10 +42,56 @@ function groupLabel(updatedAt: number, todayStart: number): string {
   return '이전'
 }
 
-export default function Sidebar({ chats, activeId, loadingId, busy, error, onSelect, onNew, onDelete, onClose, drive }: Props) {
+export default function Sidebar({ chats, activeId, loadingId, busy, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
   const todayStart = new Date().setHours(0, 0, 0, 0)
+  const projectIds = new Set(projects.map((p) => p.id))
+  const inProject = (c: ChatSummary) => !!c.projectId && projectIds.has(c.projectId)
+  // 펼친 프로젝트(지금 대화의 프로젝트는 항상 펼침)
+  const [open, setOpen] = useState<Record<string, boolean>>({})
+  const isOpen = (id: string) => open[id] ?? id === activeProjectId
+  // '프로젝트로 옮기기' 메뉴가 열린 대화
+  const [moveMenu, setMoveMenu] = useState<string | null>(null)
+  useEffect(() => {
+    if (!moveMenu) return
+    const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest('.move-menu, [aria-expanded="true"]')) setMoveMenu(null) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [moveMenu])
+
+  const row = (chat: ChatSummary) => (
+    <li key={chat.id} className="sidebar-item" data-active={chat.id === (loadingId ?? activeId)} aria-busy={chat.id === loadingId} style={{ position: 'relative' }}>
+      <button onClick={() => onSelect(chat.id)} disabled={busy} className="sidebar-item-open" title={chat.title}>
+        {chat.id === loadingId
+          ? <Loader2 aria-label="불러오는 중" className="motion-safe:animate-spin" style={{ width: 14, height: 14, flexShrink: 0 }} />
+          : <MessageSquare aria-hidden="true" style={{ width: 14, height: 14, flexShrink: 0 }} />}
+        <span className="truncate" style={chat.driveOnly ? { opacity: 0.55 } : undefined}>{chat.title}</span>
+        {chat.pending && drive?.connected === false && drive.expired && (
+          <span title="드라이브를 다시 연결하면 자동으로 올라갑니다" style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 10, color: 'var(--warn)' }}>대기</span>
+        )}
+      </button>
+      {projects.length > 0 && (
+        <button onClick={() => setMoveMenu(moveMenu === chat.id ? null : chat.id)} disabled={busy} className="sidebar-item-delete" title="프로젝트로 옮기기" aria-label={`${chat.title} 프로젝트로 옮기기`} aria-expanded={moveMenu === chat.id}>
+          <Ellipsis style={{ width: 14, height: 14 }} />
+        </button>
+      )}
+      <button onClick={() => onDelete(chat.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${chat.title} 삭제`}>
+        <Trash2 style={{ width: 14, height: 14 }} />
+      </button>
+      {moveMenu === chat.id && (
+        <div role="menu" className="move-menu">
+          <div className="move-menu-title">프로젝트로 옮기기</div>
+          {projects.filter((p) => p.id !== chat.projectId).map((p) => (
+            <button key={p.id} role="menuitem" onClick={() => { onMoveChat(chat.id, p.id); setMoveMenu(null) }}>📁 {p.name}</button>
+          ))}
+          {inProject(chat) && <button role="menuitem" onClick={() => { onMoveChat(chat.id, null); setMoveMenu(null) }}>프로젝트에서 빼기</button>}
+          <button role="menuitem" onClick={() => setMoveMenu(null)} style={{ color: 'var(--txt-3)' }}>닫기</button>
+        </div>
+      )}
+    </li>
+  )
+
   const groups: { label: string; items: ChatSummary[] }[] = []
-  for (const chat of chats) {
+  for (const chat of chats.filter((c) => !inProject(c))) {
     const label = groupLabel(chat.updatedAt, todayStart)
     const last = groups[groups.length - 1]
     if (last?.label === label) last.items.push(chat)
@@ -50,12 +105,49 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
           <Plus style={{ width: 16, height: 16 }} />
           <span>새 대화</span>
         </button>
+        <button onClick={onNewProject} disabled={busy} className="icon-btn tip" aria-label="새 프로젝트">
+          <FolderGit2 style={{ width: 18, height: 18 }} />
+        </button>
         <button onClick={onClose} className="icon-btn" aria-label="대화 목록 접기" aria-expanded>
           <PanelLeft style={{ width: 18, height: 18 }} />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 pb-3">
+        {projects.length > 0 && (
+          <section className="mb-3">
+            <h2 className="sidebar-group">프로젝트</h2>
+            <ul>
+              {projects.map((p) => {
+                const items = chats.filter((c) => c.projectId === p.id)
+                return (
+                  <li key={p.id}>
+                    <div className="sidebar-item" data-active={p.id === activeProjectId && !activeId}>
+                      <button className="sidebar-item-open" onClick={() => setOpen((o) => ({ ...o, [p.id]: !isOpen(p.id) }))} aria-expanded={isOpen(p.id)} title={p.name}>
+                        {isOpen(p.id) ? <ChevronDown style={{ width: 14, height: 14, flexShrink: 0 }} /> : <ChevronRight style={{ width: 14, height: 14, flexShrink: 0 }} />}
+                        <span className="truncate" style={{ fontWeight: 600 }}>📁 {p.name}</span>
+                        <span style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 11, color: 'var(--txt-3)' }}>{items.length}</span>
+                      </button>
+                      <button onClick={() => onNewChatInProject(p.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${p.name}에서 새 대화`}>
+                        <Plus style={{ width: 14, height: 14 }} />
+                      </button>
+                      <button onClick={() => onEditProject(p)} className="sidebar-item-delete tip" aria-label={`${p.name} 설정`}>
+                        <SlidersHorizontal style={{ width: 14, height: 14 }} />
+                      </button>
+                    </div>
+                    {isOpen(p.id) && (
+                      <ul style={{ paddingLeft: 14 }}>
+                        {items.length === 0
+                          ? <li style={{ color: 'var(--txt-3)', fontSize: 'var(--fs-xs)', padding: '4px 10px' }}>+ 를 눌러 이 프로젝트에서 새 대화를 시작하세요</li>
+                          : items.map(row)}
+                      </ul>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        )}
         {chats.length === 0 && (
           <p style={{ color: 'var(--txt-3)', fontSize: 'var(--fs-sm)', padding: '8px 10px' }}>
             저장된 대화가 없습니다
@@ -63,24 +155,9 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
         )}
         {groups.map((group) => (
           <section key={group.label} className="mb-3">
-            <h2 className="sidebar-group">{group.label}</h2>
+            <h2 className="sidebar-group">{projects.length ? `대화 · ${group.label}` : group.label}</h2>
             <ul>
-              {group.items.map((chat) => (
-                <li key={chat.id} className="sidebar-item" data-active={chat.id === (loadingId ?? activeId)} aria-busy={chat.id === loadingId}>
-                  <button onClick={() => onSelect(chat.id)} disabled={busy} className="sidebar-item-open" title={chat.title}>
-                    {chat.id === loadingId
-                      ? <Loader2 aria-label="불러오는 중" className="motion-safe:animate-spin" style={{ width: 14, height: 14, flexShrink: 0 }} />
-                      : <MessageSquare aria-hidden="true" style={{ width: 14, height: 14, flexShrink: 0 }} />}
-                    <span className="truncate" style={chat.driveOnly ? { opacity: 0.55 } : undefined}>{chat.title}</span>
-                    {chat.pending && drive?.connected === false && drive.expired && (
-                      <span title="드라이브를 다시 연결하면 자동으로 올라갑니다" style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 10, color: 'var(--warn)' }}>대기</span>
-                    )}
-                  </button>
-                  <button onClick={() => onDelete(chat.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${chat.title} 삭제`}>
-                    <Trash2 style={{ width: 14, height: 14 }} />
-                  </button>
-                </li>
-              ))}
+              {group.items.map(row)}
             </ul>
           </section>
         ))}

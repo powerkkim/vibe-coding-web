@@ -1,4 +1,6 @@
 import { currentAccessToken, DRIVE_API, DRIVE_UPLOAD, driveRequest, hasFileScope } from './drive'
+import type { MessageDoc, MessageImage } from './ai'
+import { readImage } from './image'
 
 /**
  * 내 드라이브에 '보이는' 파일로 내보내기 (drive.file 권한)
@@ -51,14 +53,65 @@ async function rootFolder(): Promise<string> {
 
 const safeName = (t: string) => (t.replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 50) || '새 프로젝트')
 
-/** 대화(프로젝트)용 폴더. chatId 로 찾으므로 제목이 바뀌어도 같은 폴더를 쓴다. */
+// 대화 → 소속 프로젝트(App 이 대화를 열거나 옮길 때 알려 준다). 프로젝트 대화는 'Vibe Coding/<프로젝트>/<대화>/' 에 저장된다.
+const chatProjects = new Map<string, { id: string; name: string } | undefined>()
+export function bindChatProject(chatId: string, project?: { id: string; name: string }) {
+  const prev = chatProjects.get(chatId)
+  chatProjects.set(chatId, project)
+  if (prev?.id !== project?.id) folderIds.delete(`chat:${chatId}`)   // 다음 저장 때 위치를 다시 확인(필요하면 폴더 이동)
+}
+
+/** 프로젝트 폴더('Vibe Coding/<프로젝트 이름>'). projectId 로 찾으므로 이름을 바꿔도 같은 폴더를 쓴다. */
+async function projectRoot(project: { id: string; name: string }): Promise<string> {
+  const key = `project:${project.id}`
+  const cached = folderIds.get(key)
+  if (cached) return cached
+  const root = await rootFolder()
+  const found = await findOne(`appProperties has { key='vibeProjectId' and value='${q(project.id)}' } and mimeType = '${FOLDER}'`)
+  const id = found?.id ?? await createFolder(safeName(project.name), root, { vibeProjectId: project.id })
+  folderIds.set(key, id)
+  return id
+}
+
+/** 프로젝트 이름을 바꾸면 드라이브 폴더 이름도 바꾼다(폴더가 아직 없으면 아무것도 안 함). */
+export async function renameProjectFolder(project: { id: string; name: string }) {
+  if (!hasFileScope()) return
+  const found = await findOne(`appProperties has { key='vibeProjectId' and value='${q(project.id)}' } and mimeType = '${FOLDER}'`)
+  if (!found) return
+  await json(await driveRequest(`${DRIVE_API}/files/${found.id}?fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: safeName(project.name) }) }))
+}
+
+/** 대화를 다른 프로젝트로 옮겼을 때, 이미 있는 대화 폴더만 새 위치로 옮긴다(없으면 아무것도 만들지 않는다). */
+export async function moveChatFolder(chatId: string): Promise<void> {
+  if (!hasFileScope()) return
+  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`, 'id,parents')
+  if (!found) return
+  const project = chatProjects.get(chatId)
+  const parent = project ? await projectRoot(project) : await rootFolder()
+  const parents = (found.parents as unknown as string[] | undefined) ?? []
+  if (!parents.includes(parent)) {
+    await json(await driveRequest(`${DRIVE_API}/files/${found.id}?addParents=${parent}&removeParents=${parents.join(',')}&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }))
+  }
+  folderIds.set(`chat:${chatId}`, found.id)
+}
+
+/**
+ * 대화용 폴더. chatId 로 찾으므로 제목이 바뀌어도 같은 폴더를 쓴다.
+ * 프로젝트 대화면 프로젝트 폴더 아래에 두고, 대화를 다른 프로젝트로 옮겼으면 폴더도 옮긴다.
+ */
 export async function projectFolder(chatId: string, title: string): Promise<string> {
   const key = `chat:${chatId}`
   const cached = folderIds.get(key)
   if (cached) return cached
-  const root = await rootFolder()
-  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`)
-  const id = found?.id ?? await createFolder(`${safeName(title)} (${chatId.slice(0, 6)})`, root, { chatId })
+  const project = chatProjects.get(chatId)
+  const parent = project ? await projectRoot(project) : await rootFolder()
+  const found = await findOne(`appProperties has { key='chatId' and value='${q(chatId)}' } and mimeType = '${FOLDER}'`, 'id,parents')
+  let id = found?.id
+  if (id && found?.parents && !found.parents.includes(parent)) {
+    const remove = (found.parents as unknown as string[]).join(',')
+    await json(await driveRequest(`${DRIVE_API}/files/${id}?addParents=${parent}&removeParents=${remove}&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }))
+  }
+  id ??= await createFolder(`${safeName(title)} (${chatId.slice(0, 6)})`, parent, { chatId })
   folderIds.set(key, id)
   return id
 }
@@ -215,7 +268,8 @@ const PICKER_KEY = (import.meta.env.VITE_GOOGLE_API_KEY as string | undefined)?.
 const APP_ID = (import.meta.env.VITE_GOOGLE_APP_ID as string | undefined)?.trim() || ''
 export const isPickerConfigured = () => !!PICKER_KEY && !!APP_ID
 
-type PickerDoc = { id: string; name: string; mimeType?: string }
+/** 선택창에서 고른 파일(내용은 아직 받지 않음) */
+export type PickerDoc = { id: string; name: string; mimeType?: string; sizeBytes?: number }
 type Gapi = { load: (lib: string, cb: () => void) => void }
 type PickerNS = {
   DocsView: new (viewId?: unknown) => { setIncludeFolders: (b: boolean) => unknown; setSelectFolderEnabled: (b: boolean) => unknown }
@@ -256,11 +310,57 @@ export async function pickDriveFile(): Promise<PickerDoc | null> {
     b = b.setOAuthToken(token) as typeof b
     b = b.setDeveloperKey(PICKER_KEY) as typeof b
     b = b.setAppId(APP_ID) as typeof b
-    b = b.setTitle('가져올 파일 선택 (프로젝트 폴더로 복사됩니다)') as typeof b
+    b = b.setTitle('첨부할 파일 선택') as typeof b
     b = b.setCallback((data: { action: string; docs?: PickerDoc[] }) => {
       if (data.action === picker.Action.PICKED && data.docs?.[0]) resolve(data.docs[0])
       else if (data.action === picker.Action.CANCEL) resolve(null)
     }) as typeof b
     ;(b.build() as { setVisible: (v: boolean) => void }).setVisible(true)
+  })
+}
+
+// ── 첨부(사진 첨부와 같은 방식) ───────────────────────────────
+// 고를 때는 이름·종류·크기만 받아 칩으로 보여주고, 메시지를 보낼 때 내용을 받아 그 메시지에 싣는다. 폴더는 만들지 않는다.
+const PDF_LIMIT = 10 * 1024 * 1024            // PDF 를 메시지에 직접 싣는 최대 크기
+const TEXT_INLINE_LIMIT = 100_000              // 텍스트를 직접 싣는 최대 글자 수. 넘으면 이름만 알리고 필요할 때 읽게 한다.
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+
+/** 보낼 때: 첨부 파일 내용을 받아 이미지 또는 문서로 만든다. */
+export async function loadAttachment(ref: PickerDoc): Promise<{ image?: MessageImage; doc?: MessageDoc }> {
+  const mime = ref.mimeType ?? ''
+  if (IMAGE_TYPES.includes(mime)) {
+    const blob = await fetchContent(ref.id, mime)
+    return { image: await readImage(new File([blob], ref.name, { type: mime })) }
+  }
+  if (mime === 'application/pdf') {
+    if ((ref.sizeBytes ?? 0) > PDF_LIMIT) return { doc: { name: ref.name, kind: 'ref', size: ref.sizeBytes ?? 0, driveId: ref.id, mimeType: mime } }
+    const blob = await fetchContent(ref.id, mime)
+    if (blob.size > PDF_LIMIT) return { doc: { name: ref.name, kind: 'ref', size: blob.size, driveId: ref.id, mimeType: mime } }
+    return { doc: { name: ref.name, kind: 'pdf', size: blob.size, data: await blobBase64(blob), driveId: ref.id, mimeType: mime } }
+  }
+  const exp = GOOGLE_EXPORT[mime]
+  const name = exp && !ref.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${ref.name}.${exp.ext}` : ref.name
+  if (!exp && !TEXT_EXT.test(ref.name) && !mime.startsWith('text/') && mime !== 'application/json') {
+    throw new Error(`${ref.name}: 이 형식은 첨부할 수 없어요 (PDF·이미지·텍스트·Google 문서/시트/슬라이드만)`)
+  }
+  const text = await (await fetchContent(ref.id, mime)).text()
+  if (text.length > TEXT_INLINE_LIMIT) return { doc: { name, kind: 'ref', size: text.length, driveId: ref.id, mimeType: mime } }
+  return { doc: { name, kind: 'text', size: text.length, text, driveId: ref.id, mimeType: mime } }
+}
+
+/** 큰 첨부를 필요할 때 읽는다(텍스트만, 최대 maxChars). */
+export async function readAttachmentText(doc: MessageDoc, maxChars = 30_000): Promise<string> {
+  if (!doc.driveId) throw new Error('드라이브 파일 정보가 없습니다')
+  if (doc.mimeType === 'application/pdf') throw new Error('PDF 가 커서(10MB 초과) 읽을 수 없습니다. 필요한 부분만 나눠 첨부해 주세요')
+  const text = await (await fetchContent(doc.driveId, doc.mimeType)).text()
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... (truncated, ${text.length} chars total)` : text
+}
+
+function blobBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).split(',')[1] ?? '')
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(blob)
   })
 }
