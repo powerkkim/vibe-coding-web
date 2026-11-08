@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect } from 'react'
 import { ArrowUp, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
 import AnswerView from './AnswerView'
-import type { Message, MessageImage, TokenUsage } from '../services/ai'
+import type { CodeMode, Message, MessageImage, TokenUsage } from '../services/ai'
 import type { PickerDoc } from '../services/driveExport'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
 import { formatUsd, remainingBalance } from '../services/usage'
@@ -40,6 +40,9 @@ interface Props {
   attachError?: string
   // 지금 대화가 속한 프로젝트 이름(없으면 일반 대화). 누르면 프로젝트 설정을 연다.
   projectName?: string
+  // 코딩 모드(수동: 코드를 만들기 전에 확인 / 자동: 스스로 판단)
+  codeMode: CodeMode
+  onCodeModeChange: (m: CodeMode) => void
   onOpenProject?: () => void
   isLoading: boolean
   hasApiKey: boolean
@@ -149,7 +152,7 @@ function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (i
   )
 }
 
-export default function ChatPanel({ projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -330,6 +333,8 @@ export default function ChatPanel({ projectName, onOpenProject, messages, onSend
                 Shift+Enter 줄바꿈
               </span>
             </span>
+            <span className="flex items-center gap-2">
+            <CodeModeMenu mode={codeMode} onChange={onCodeModeChange} />
             <button onClick={isLoading && !interrupting ? onStop : submit} disabled={!isLoading && !canSend}
               aria-label={interrupting ? '지금 답변을 멈추고 보내기' : isLoading ? '생성 중지' : '전송'}
               className="tip tip-up flex items-center justify-center transition-colors"
@@ -348,6 +353,7 @@ export default function ChatPanel({ projectName, onOpenProject, messages, onSend
                 ? <Square style={{ width: 12, height: 12 }} fill="currentColor" />
                 : <ArrowUp style={{ width: 16, height: 16 }} />}
             </button>
+            </span>
           </div>
         </div>
       </div>
@@ -515,6 +521,12 @@ export default function ChatPanel({ projectName, onOpenProject, messages, onSend
                       이어서 생성
                     </button>
                   )}
+                  {msg.confirm && i === messages.length - 1 && !isLoading && (
+                    <button onClick={() => onSend('[코딩 진행] 위에서 정리한 대로 코딩해 줘.', [])} className="self-start"
+                      style={{ height: 32, padding: '0 14px', border: 'none', borderRadius: 999, background: 'var(--accent)', color: 'var(--on-accent)', fontSize: 'var(--fs-md)', cursor: 'pointer' }}>
+                      코딩 진행
+                    </button>
+                  )}
                   {msg.failed && i === messages.length - 1 && !isLoading && (
                     <button onClick={onRetry} className="self-start"
                       style={{ height: 32, padding: '0 14px', border: '1px solid var(--border)', borderRadius: 999, background: 'var(--bg-panel)', color: 'var(--txt)', fontSize: 'var(--fs-md)', cursor: 'pointer' }}>
@@ -587,5 +599,45 @@ export default function ChatPanel({ projectName, onOpenProject, messages, onSend
         </div>
       )}
     </div>
+  )
+}
+/** 입력창 오른쪽 아래 코딩 모드 선택(Claude 앱의 권한 모드처럼) */
+function CodeModeMenu({ mode, onChange }: { mode: CodeMode; onChange: (m: CodeMode) => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false) }
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', esc)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc) }
+  }, [open])
+  const items: { m: CodeMode; label: string; desc: string }[] = [
+    { m: 'manual', label: '수동', desc: 'Claude는 코드를 만들거나 고치기 전에 확인을 요청합니다. "코딩해", "만들어" 처럼 분명히 요청하면 바로 진행합니다.' },
+    { m: 'auto', label: '자동', desc: 'Claude가 필요하다고 판단하면 확인 없이 바로 코드를 만들거나 고칩니다. 일반 질문에는 대화로 답합니다.' },
+  ]
+  return (
+    <span ref={ref} style={{ position: 'relative' }}>
+      <button type="button" className="code-mode-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`코딩 모드: ${mode === 'auto' ? '자동' : '수동'}`}
+        onClick={() => setOpen((o) => !o)}>
+        {mode === 'auto' ? '자동' : '수동'}
+      </button>
+      {open && (
+        <div role="menu" className="code-mode-menu">
+          <div className="code-mode-title">코딩 모드</div>
+          {items.map((it) => (
+            <button key={it.m} role="menuitemradio" aria-checked={mode === it.m} className="code-mode-item"
+              onClick={() => { onChange(it.m); setOpen(false) }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span className="code-mode-label">{it.label}</span>
+                <span className="code-mode-desc">{it.desc}</span>
+              </span>
+              {mode === it.m && <span aria-hidden="true" style={{ color: 'var(--accent)', fontSize: 16 }}>✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   )
 }
