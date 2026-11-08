@@ -127,6 +127,8 @@ export interface StreamHooks {
   onFile?: (fileId: string) => void
   // 앱 도구 실행. 없으면 앱 도구 호출에서 멈춘다.
   onClientTool?: (name: string, input: Record<string, unknown>) => Promise<ClientToolResult>
+  // 앱이 직접 정의하는 도구(앱 상태 확인·드라이브 연결 요청). 직접 호출 모드에서만 싣는다.
+  appTools?: Record<string, unknown>[]
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -313,6 +315,8 @@ Vue mode rules:
 - web_fetch: read a URL the user gave (docs, reference pages, PDFs) before building from it.
 - code_execution: run Python/Bash to analyze data, compute results or verify logic. Files saved to $OUTPUT_DIR are offered to the user for download.
 - advisor: consult it once for hard design/architecture decisions, not for routine edits.
+- app_status: call it only when the user asks about this app's state (whether Google Drive is connected, where chats are saved, which model/tools are on). Do not guess the app state.
+- request_drive_connection: when the user wants chats saved to or loaded from Google Drive and app_status shows Drive is not connected or expired, call it to show a connect popup. Chats then save automatically; saved chats are listed in the left sidebar.
 
 ## Web search
 - A web_search tool may be available. Use it only when the request needs current or external facts: latest library/CDN versions or APIs, official docs, news, prices, or real data to show in the page.
@@ -398,7 +402,10 @@ export async function* streamCode(
 
   const info = MODELS.find((m) => m.id === model)
   const fast = options.fast && !!info?.fast
-  const { tools, betas } = buildTools(model, options)
+  const built = buildTools(model, options)
+  const betas = built.betas
+  // 앱 도구는 도구 목록 맨 뒤에 둔다(내용이 고정이라 캐시되는 앞부분에 포함된다).
+  const tools = [...built.tools, ...(SERVER_URL ? [] : hooks.appTools ?? [])]
   const advisorOn = betas.includes(ADVISOR_BETA)
   // 빠른 모드·어드바이저를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 그때는 fallback 을 쓰지 않는다.
   const useFallback = (info?.fallback ?? false) && !fast && !advisorOn

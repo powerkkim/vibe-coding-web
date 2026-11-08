@@ -13,7 +13,8 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
-import { backupChat, chatTitle, clearDriveListCache, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
+import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
+import DriveConnectModal from './components/DriveConnectModal'
 import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
@@ -101,6 +102,20 @@ const IMAGE_ONLY_PROMPT = '이 이미지를 설명해 주세요'
 
 // 파일 편집처럼 연속으로 바뀌는 변경을 한 번에 저장하기 위한 대기 시간
 const SAVE_DELAY_MS = 500
+
+// 앱이 직접 실행하는 도구(Claude 가 필요할 때만 호출). 내용이 고정이라 캐시되는 앞부분에 들어가 평소 비용이 거의 없다.
+const APP_TOOLS: Record<string, unknown>[] = [
+  {
+    name: 'app_status',
+    description: "Returns this app's current state: where chats are saved (Google Drive connection and account, uploads waiting in the browser), the model, and which tools are on. Call only when the user asks about these.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  ...(USE_DRIVE && isDriveConfigured() ? [{
+    name: 'request_drive_connection',
+    description: 'Shows the user a popup asking them to connect Google Drive. Use when the user wants chats saved to or loaded from Google Drive and Drive is not connected or expired.',
+    input_schema: { type: 'object', properties: {} },
+  }] : []),
+]
 // 생성 도중 받은 부분을 최근 대화 백업(IndexedDB)에 남기는 간격. 브라우저가 죽어도 여기까지는 복구된다.
 const PARTIAL_BACKUP_MS = 4000
 
@@ -261,6 +276,33 @@ export default function App() {
       setDriveBusy(false)
     }
   }
+  // 드라이브 연결 안내 팝업. welcome: 처음 실행(한 번도 연결 안 함), request: 챗봇이 연결을 요청함
+  const [driveModal, setDriveModal] = useState<'welcome' | 'request' | null>(() => {
+    try {
+      if (!USE_DRIVE || !isDriveConfigured() || isDriveConnected() || driveAccount()) return null
+      return localStorage.getItem('vibe_drive_prompt_off') === '1' ? null : 'welcome'
+    } catch { return null }
+  })
+  const [driveModalError, setDriveModalError] = useState('')
+  const connectFromModal = async () => {
+    setDriveModalError('')
+    setDriveBusy(true)
+    try {
+      await connectDrive()
+      setStorageError('')
+      setDriveModal(null)
+    } catch (e) {
+      setDriveModalError(e instanceof Error ? e.message : 'Google 드라이브에 연결하지 못했습니다')
+    } finally {
+      setDriveBusy(false)
+    }
+  }
+  const closeDriveModal = (dontShowAgain: boolean) => {
+    if (dontShowAgain) { try { localStorage.setItem('vibe_drive_prompt_off', '1') } catch { /* 무시 */ } }
+    setDriveModal(null)
+    setDriveModalError('')
+  }
+
   const handleDisconnectDrive = () => {
     disconnectDrive()
     clearDriveListCache()
@@ -444,6 +486,17 @@ export default function App() {
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
   const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
     if (name === 'memory') return runMemoryCommand(input)
+    if (name === 'app_status') {
+      const on = (Object.entries({ 'web search': modelOptions.webSearch, 'web fetch': modelOptions.webFetch, 'partial edit (text editor)': modelOptions.textEditor, memory: modelOptions.memory, 'code execution': modelOptions.codeExecution }) as [string, boolean][])
+        .filter(([, v]) => v).map(([k]) => k)
+      return { content: `${await storageStatusLine()} Model: ${activeModel}. Tools on: ${on.join(', ') || 'none'}${modelOptions.advisorModel ? `, advisor (${modelOptions.advisorModel})` : ''}.` }
+    }
+    if (name === 'request_drive_connection') {
+      if (isDriveConnected()) return { content: `Google Drive is already connected as ${driveAccount()?.email ?? 'the user'}; chats are saved automatically.` }
+      if (!isDriveConfigured()) return { content: 'Google Drive is not configured in this deployment (no client ID), so it cannot be connected.', isError: true }
+      setDriveModal('request')
+      return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
+    }
     if (name === 'str_replace_based_edit_tool') {
       const base = baseProjectRef.current
       const { result, next, changed } = runEditorCommand(projectFilesRef.current, input)
@@ -592,6 +645,7 @@ export default function App() {
             onSource: handleSource,
             onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
             onClientTool: runClientTool,
+            appTools: APP_TOOLS,
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
@@ -1036,6 +1090,9 @@ export default function App() {
           />
         </div>
       </div>
+      {driveModal && !driveConnected && (
+        <DriveConnectModal mode={driveModal} busy={driveBusy} error={driveModalError} onConnect={connectFromModal} onClose={closeDriveModal} />
+      )}
     </div>
   )
 }
