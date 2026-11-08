@@ -570,7 +570,8 @@ export default function App() {
         return { content: text.length > 30_000 ? `${text.slice(0, 30_000)}\n... (truncated)` : text }
       }
       if (cmd === 'pick') {
-        if (!isPickerConfigured()) return { content: 'The Google file picker is not configured in this deployment.', isError: true }
+        // 선택창 설정이 빠졌을 때 '관리자에게 요청하라' 대신 빠진 설정을 정확히 안내하게 한다(이 앱은 보통 사용자 본인이 운영한다).
+        if (!isPickerConfigured()) return { content: 'The Google file picker is not set up in this deployment yet, so existing Drive files cannot be picked. The user is most likely the app owner; tell them exactly what is missing: (1) enable "Google Picker API" in Google Cloud Console, (2) create an API key restricted to the website https://powerkkim.github.io/* and to Google Picker API, (3) add GitHub repository Variables GOOGLE_API_KEY (that key) and GOOGLE_APP_ID (the Cloud project number), (4) re-run the "Deploy to GitHub Pages" workflow. Files already in the Vibe Coding folder can still be read with the read command.', isError: true }
         return { content: await importFromDrive() }
       }
       if (cmd === 'save_project') {
