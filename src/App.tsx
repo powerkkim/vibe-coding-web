@@ -15,7 +15,9 @@ import { PanelLeft, GripVertical } from './icons'
 import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
-import { connectDrive, disconnectDrive, driveAccount, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
+import { exportProject, FileScopeError, importPicked, isPickerConfigured, listFolder, pickDriveFile, readFromProject, saveToProject } from './services/driveExport'
+import { downloadOutputFile } from './services/ai'
+import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
@@ -111,6 +113,19 @@ const APP_TOOLS: Record<string, unknown>[] = [
     input_schema: { type: 'object', properties: {} },
   },
   ...(USE_DRIVE && isDriveConfigured() ? [{
+    name: 'drive_files',
+    description: "Saves or lists VISIBLE files in the user's Google Drive under 'Vibe Coding/<this project>/'. Project files are already auto-saved there after each answer when auto-save is on. Use when the user asks to save something to Drive or to see what is in the Drive folder. Only files this app created are visible (not the user's other Drive folders).",
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', enum: ['save_project', 'save_text', 'save_outputs', 'list', 'read', 'pick'], description: 'save_project: save all current project files now; save_text: save `content` as file `path`; save_outputs: save files produced by code execution in this chat; list: list the project folder (or the Vibe Coding root when scope is "root"); read: read file `path` from the project folder; pick: open the Google file picker so the user can choose an existing Drive file, which is COPIED into the project folder (imports/) and, if text, added to the project files for editing (the original is never modified)' },
+        path: { type: 'string', description: 'File path for save_text/read, e.g. "report.md" or "imports/notes.txt"' },
+        content: { type: 'string', description: 'Text content for save_text' },
+        scope: { type: 'string', enum: ['project', 'root'], description: 'For list' },
+      },
+      required: ['command'],
+    },
+  }, {
     name: 'request_drive_connection',
     description: 'Shows the user a popup asking them to connect Google Drive. Use when the user wants chats saved to or loaded from Google Drive and Drive is not connected or expired.',
     input_schema: { type: 'object', properties: {} },
@@ -277,7 +292,12 @@ export default function App() {
     }
   }
   // 드라이브 연결 안내 팝업. welcome: 처음 실행(한 번도 연결 안 함), request: 챗봇이 연결을 요청함
-  const [driveModal, setDriveModal] = useState<'welcome' | 'request' | null>(() => {
+  // 프로젝트 파일 자동 저장(내 드라이브 Vibe Coding 폴더). 기본 켬.
+  const [driveAutoSave, setDriveAutoSave] = useState(() => { try { return localStorage.getItem('vibe_drive_autosave') !== '0' } catch { return true } })
+  const toggleDriveAutoSave = (on: boolean) => { setDriveAutoSave(on); try { localStorage.setItem('vibe_drive_autosave', on ? '1' : '0') } catch { /* 무시 */ } }
+  const [driveFolderUrl, setDriveFolderUrl] = useState<string | null>(null)
+  const scopeAskedRef = useRef(false)
+  const [driveModal, setDriveModal] = useState<'welcome' | 'request' | 'scope' | null>(() => {
     try {
       if (!USE_DRIVE || !isDriveConfigured() || isDriveConnected() || driveAccount()) return null
       return localStorage.getItem('vibe_drive_prompt_off') === '1' ? null : 'welcome'
@@ -288,9 +308,16 @@ export default function App() {
     setDriveModalError('')
     setDriveBusy(true)
     try {
-      await connectDrive()
+      // 권한 추가 팝업이면 drive.file 동의 화면을 띄운다. 그 외에는 처음 연결(두 권한 함께) 또는 재연결.
+      const wasScope = driveModal === 'scope'
+      await connectDrive(wasScope ? { withFiles: true } : {})
       setStorageError('')
       setDriveModal(null)
+      // 권한을 추가했으면 지금 프로젝트를 바로 드라이브 폴더에 저장한다.
+      const id = genChatIdRef.current ?? chatId
+      if (wasScope && driveAutoSave && id && Object.keys(projectFilesRef.current).length) {
+        exportProject(id, chatTitle(messages), projectFilesRef.current).then((r) => setDriveFolderUrl(r.url)).catch(() => {})
+      }
     } catch (e) {
       setDriveModalError(e instanceof Error ? e.message : 'Google 드라이브에 연결하지 못했습니다')
     } finally {
@@ -483,6 +510,40 @@ export default function App() {
   const outputFilesRef = useRef<string[]>([])
   // 텍스트 에디터로 이번 턴에 바뀐 파일
   const editedRef = useRef(new Set<string>())
+  const [importNotice, setImportNotice] = useState('')
+  /**
+   * 드라이브 파일 가져오기(A안): 선택창에서 고른 파일을 프로젝트 폴더 imports/ 로 복사하고,
+   * 텍스트 파일이면 프로젝트 파일에도 넣는다 → Claude 가 읽고 고칠 수 있고, 고친 내용은 자동 저장으로 사본에 저장된다. 원본은 그대로.
+   */
+  const importFromDrive = async (): Promise<string> => {
+    if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
+    if (!hasFileScope()) { setDriveModal('scope'); throw new Error('드라이브 파일 권한 추가가 필요해요') }
+    const picked = await pickDriveFile()
+    if (!picked) return 'The user cancelled the file picker.'
+    const id = genChatIdRef.current ?? chatId ?? crypto.randomUUID()
+    if (!chatId && !genChatIdRef.current) { genChatIdRef.current = id; setChatId(id); chatCreatedAtRef.current = Date.now() }
+    const title = messages.length ? chatTitle(messages) : picked.name
+    const r = await importPicked(id, title, picked)
+    if (r.text !== undefined) {
+      const next = { ...projectFilesRef.current, [r.path]: r.text }
+      baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
+      projectFilesRef.current = next
+      setProjectFiles(next)
+      unsavedRef.current = true
+    }
+    const msg = r.text !== undefined
+      ? `"${r.source}"을(를) 프로젝트 폴더에 ${r.path} 로 복사했어요. 원본은 그대로이고, 이 사본을 고쳐서 저장합니다.`
+      : `"${r.source}"을(를) ${r.path} 로 복사했어요(${Math.round(r.size / 1024)}KB). 텍스트가 아니거나 커서 대화에는 넣지 않았어요.`
+    setImportNotice(msg)
+    return r.text !== undefined
+      ? `Copied "${r.source}" into the project folder as ${r.path}; it is now one of the current project files (edit that path; the original stays untouched).`
+      : `Copied "${r.source}" into the project folder as ${r.path} (${r.size} bytes). It is binary or too large, so its content was not added to the conversation.`
+  }
+  const handleImportClick = () => {
+    setImportNotice('')
+    importFromDrive().catch((e) => setImportNotice(e instanceof Error ? e.message : '가져오지 못했습니다'))
+  }
+
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
   const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
     if (name === 'memory') return runMemoryCommand(input)
@@ -490,6 +551,54 @@ export default function App() {
       const on = (Object.entries({ 'web search': modelOptions.webSearch, 'web fetch': modelOptions.webFetch, 'partial edit (text editor)': modelOptions.textEditor, memory: modelOptions.memory, 'code execution': modelOptions.codeExecution }) as [string, boolean][])
         .filter(([, v]) => v).map(([k]) => k)
       return { content: `${await storageStatusLine()} Model: ${activeModel}. Tools on: ${on.join(', ') || 'none'}${modelOptions.advisorModel ? `, advisor (${modelOptions.advisorModel})` : ''}.` }
+    }
+    if (name === 'drive_files') {
+      if (!isDriveConnected()) { setDriveModal('request'); return { content: 'Google Drive is not connected. A connect popup is now shown; ask the user to connect and then try again.', isError: true } }
+      if (!hasFileScope()) { setDriveModal('scope'); return { content: 'Saving visible files needs one more Google permission. A popup asking the user to allow it is now shown; ask them to press it, then try again.', isError: true } }
+      const id = genChatIdRef.current ?? chatId
+      if (!id) return { content: 'No chat yet.', isError: true }
+      const title = chatTitle(messages.length ? messages : [{ role: 'user', content: '새 프로젝트' }])
+      const cmd = String(input.command ?? '')
+      if (cmd === 'list') {
+        const r = await listFolder(input.scope === 'root' ? undefined : id, title)
+        return { content: `${r.url}\n${r.items.join('\n') || '(empty)'}` }
+      }
+      if (cmd === 'read') {
+        const path = String(input.path ?? '').trim()
+        if (!path) return { content: 'path is required', isError: true }
+        const text = await readFromProject(id, title, path)
+        return { content: text.length > 30_000 ? `${text.slice(0, 30_000)}\n... (truncated)` : text }
+      }
+      if (cmd === 'pick') {
+        if (!isPickerConfigured()) return { content: 'The Google file picker is not configured in this deployment.', isError: true }
+        return { content: await importFromDrive() }
+      }
+      if (cmd === 'save_project') {
+        const r = await exportProject(id, title, projectFilesRef.current)
+        setDriveFolderUrl(r.url)
+        return { content: `Saved project files to ${r.url} (${r.uploaded} file(s) updated, unchanged ones skipped).` }
+      }
+      if (cmd === 'save_text') {
+        const path = String(input.path ?? '').trim()
+        if (!path) return { content: 'path is required', isError: true }
+        const url = await saveToProject(id, title, path, String(input.content ?? ''))
+        setDriveFolderUrl(url)
+        return { content: `Saved ${path} to ${url}` }
+      }
+      if (cmd === 'save_outputs') {
+        const ids = [...new Set([...messages.flatMap((m) => m.outputs ?? []), ...outputFilesRef.current])]
+        if (!ids.length) return { content: 'There are no code execution output files in this chat.' }
+        const saved: string[] = []
+        let url = ''
+        for (const fid of ids) {
+          const { name: fname, blob } = await downloadOutputFile(fid)
+          url = await saveToProject(id, title, `outputs/${fname}`, blob)
+          saved.push(fname)
+        }
+        setDriveFolderUrl(url)
+        return { content: `Saved ${saved.join(', ')} to ${url} (outputs/).` }
+      }
+      return { content: `Unknown command ${cmd}`, isError: true }
     }
     if (name === 'request_drive_connection') {
       if (isDriveConnected()) return { content: `Google Drive is already connected as ${driveAccount()?.email ?? 'the user'}; chats are saved automatically.` }
@@ -787,6 +896,17 @@ export default function App() {
         }
         return updated
       })
+      // 프로젝트 파일 자동 저장(내 드라이브). 응답을 막지 않도록 뒤에서 처리한다.
+      if (USE_DRIVE && driveAutoSave && Object.keys(files).length > 0 && backupId && isDriveConnected()) {
+        if (hasFileScope()) {
+          exportProject(backupId, chatTitle(history), projectFilesRef.current)
+            .then((r) => setDriveFolderUrl(r.url))
+            .catch((e) => setStorageError(e instanceof FileScopeError ? e.message : '드라이브 폴더에 프로젝트 파일을 저장하지 못했습니다'))
+        } else if (!scopeAskedRef.current) {
+          scopeAskedRef.current = true
+          setDriveModal('scope')
+        }
+      }
     } catch (err: unknown) {
       pendingRealtimePatchRef.current = null
       if (realtimePatchTimerRef.current) {
@@ -905,6 +1025,7 @@ export default function App() {
         return
       }
       resetConversation()
+      setDriveFolderUrl(null)
       setChatId(chat.id)
       chatCreatedAtRef.current = chat.createdAt
       setMessages(chat.messages)
@@ -990,7 +1111,7 @@ export default function App() {
       onNew={handleNewChat}
       onDelete={handleDeleteChat}
       onClose={toggleSidebar}
-      drive={USE_DRIVE ? { configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
+      drive={USE_DRIVE ? { autoSave: driveAutoSave, onAutoSave: toggleDriveAutoSave, folderUrl: driveFolderUrl, configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
     />
   )
 
@@ -1040,6 +1161,18 @@ export default function App() {
             onStop={handleStop}
             onRetry={handleRetry}
             onContinue={handleContinue}
+            onImportFromDrive={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? handleImportClick : undefined}
+            importNotice={importNotice}
+            onSaveOutputToDrive={USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
+              if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
+              if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }
+              const id = genChatIdRef.current ?? chatId
+              if (!id) throw new Error('대화가 없습니다')
+              const { name: fname, blob } = await downloadOutputFile(fid)
+              const url = await saveToProject(id, chatTitle(messages), `outputs/${fname}`, blob)
+              setDriveFolderUrl(url)
+              return url
+            } : undefined}
             isLoading={isLoading}
             hasApiKey={!!activeApiKey}
             width={isMobile || !canvasOpen ? undefined : chatWidth}
@@ -1090,7 +1223,7 @@ export default function App() {
           />
         </div>
       </div>
-      {driveModal && !driveConnected && (
+      {driveModal && (driveModal === 'scope' ? !hasFileScope() : !driveConnected) && (
         <DriveConnectModal mode={driveModal} busy={driveBusy} error={driveModalError} onConnect={connectFromModal} onClose={closeDriveModal} />
       )}
     </div>
