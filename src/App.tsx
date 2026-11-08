@@ -18,7 +18,7 @@ import DriveConnectModal from './components/DriveConnectModal'
 import ProjectModal from './components/ProjectModal'
 import { loadProjects, newProject, projectContext, saveProjects } from './services/projectStore'
 import type { Project } from './services/projectStore'
-import { bindChatProject, exportProject, FileScopeError, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
+import { bindChatProject, exportProject, FileScopeError, cleanFileName, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
 import type { PickerDoc } from './services/driveExport'
 import { downloadOutputFile } from './services/ai'
 import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
@@ -30,7 +30,7 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, isBuildRequest, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
 import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
@@ -115,6 +115,21 @@ const APP_TOOLS: Record<string, unknown>[] = [
     name: 'app_status',
     description: "Returns this app's current state: where chats are saved (Google Drive connection and account, uploads waiting in the browser), the model, and which tools are on. Call only when the user asks about these.",
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'project_files',
+    description: "Reads, deletes or renames files of the current project (the files listed in the conversation). Use read to see a file whose content was not included (large files, imports/ data, or when only the file list was sent). Use delete/rename only when the user asks to remove or rename a file. To create or rewrite a file, use <VIBE_FILE> instead.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', enum: ['list', 'read', 'delete', 'rename'] },
+        path: { type: 'string', description: 'Project file path, e.g. "app.js" or "imports/data.csv"' },
+        new_path: { type: 'string', description: 'New path for rename' },
+        start_line: { type: 'integer', description: 'read: first line to return (1-based, default 1)' },
+        max_lines: { type: 'integer', description: 'read: number of lines to return (default: whole file up to 60,000 chars)' },
+      },
+      required: ['command'],
+    },
   },
   ...(USE_DRIVE && isDriveConfigured() ? [{
     name: 'drive_files',
@@ -588,6 +603,51 @@ export default function App() {
   const outputFilesRef = useRef<string[]>([])
   // 텍스트 에디터로 이번 턴에 바뀐 파일
   const editedRef = useRef(new Set<string>())
+  // 이번 답변에서 파일을 지우거나 이름을 바꿨는지(되돌리기 지점으로 남긴다)
+  const structuralChangeRef = useRef(false)
+  const runProjectFiles = (input: Record<string, unknown>): ClientToolResult => {
+    const files = projectFilesRef.current
+    const path = String(input.path ?? '').replace(/^\/+/, '')
+    const command = String(input.command ?? '')
+    const apply = (next: Record<string, string>) => {
+      baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
+      projectFilesRef.current = next
+      setProjectFiles(next)
+      structuralChangeRef.current = true
+      unsavedRef.current = true
+    }
+    if (command === 'list') {
+      const names = Object.keys(files)
+      return { content: names.length ? names.map((n) => `${n} (${files[n].split('\n').length} lines, ${files[n].length} chars)`).join('\n') : 'No project files yet.' }
+    }
+    if (!(path in files)) return { content: `No project file "${path}". Files: ${Object.keys(files).join(', ') || 'none'}`, isError: true }
+    if (command === 'read') {
+      const lines = files[path].split('\n')
+      const start = Math.max(1, Number(input.start_line) || 1)
+      const count = Number(input.max_lines) > 0 ? Number(input.max_lines) : lines.length
+      let text = lines.slice(start - 1, start - 1 + count).join('\n')
+      const cut = text.length > 60_000
+      if (cut) text = text.slice(0, 60_000)
+      return { content: `${path} (lines ${start}-${Math.min(lines.length, start - 1 + count)} of ${lines.length})\n${text}${cut ? '\n…(truncated at 60,000 chars; read the rest with start_line)' : ''}` }
+    }
+    if (command === 'delete') {
+      const next = { ...files }
+      delete next[path]
+      apply(next)
+      return { content: `Deleted ${path}.` }
+    }
+    if (command === 'rename') {
+      const raw = String(input.new_path ?? '').replace(/^\/+/, '')
+      const to = raw.split('/').map(cleanFileName).join('/')
+      if (!raw) return { content: 'new_path is required.', isError: true }
+      if (to in files) return { content: `"${to}" already exists.`, isError: true }
+      const next: Record<string, string> = {}
+      for (const [n, c] of Object.entries(files)) next[n === path ? to : n] = c
+      apply(next)
+      return { content: `Renamed ${path} to ${to}.` }
+    }
+    return { content: `Unknown command ${command}`, isError: true }
+  }
   /** 드라이브 파일 첨부: 선택창에서 고른 파일 정보만 돌려준다(내용은 보낼 때 받는다, 폴더도 만들지 않는다). */
   const pickForAttachment = async (): Promise<PickerDoc | null> => {
     if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
@@ -686,6 +746,7 @@ export default function App() {
       setDriveModal('request')
       return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
     }
+    if (name === 'project_files') return runProjectFiles(input)
     if (name === 'str_replace_based_edit_tool') {
       const base = baseProjectRef.current
       const { result, next, changed } = runEditorCommand(projectFilesRef.current, input)
@@ -804,6 +865,7 @@ export default function App() {
     turnUsageRef.current = null
     outputFilesRef.current = []
     editedRef.current = new Set()
+    structuralChangeRef.current = false
     lastRealtimePatchRef.current = ''
     lastRealtimePatchAtRef.current = 0
     pendingRealtimePatchRef.current = null
@@ -851,6 +913,8 @@ export default function App() {
             appTools: APP_TOOLS,
             projectContext: projectContext(projects.find((p) => p.id === chatProjectIdRef.current)),
             codeMode,
+            // 코드를 만들거나 고치라는 메시지일 때만 파일 전체를 보내고, 일반 대화에는 목록만 보낸다.
+            filesMode: isBuildRequest(history[history.length - 1]?.content ?? '') ? 'full' : 'list',
           })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
@@ -977,9 +1041,13 @@ export default function App() {
       // 수동 모드에서 모델이 '코딩 진행' 확인을 요청했는지(파일을 만들지 않은 답변에서만)
       const askConfirm = bufferRef.current.includes('<VIBE_CONFIRM') && !bufferRef.current.includes('<VIBE_FILE')
       const plain = hideConfirmTag(bufferRef.current)
-      const body = explanation || (plain.includes('<VIBE_')
-        ? (truncated ? '' : '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.')
-        : plain.trim())
+      // 파일이 실제로 바뀐 경우에만 '완성' 이라고 한다.
+      const changedAny = Object.keys(files).length > 0 || structuralChangeRef.current
+      const noChangeNote = !changedAny && !truncated && bufferRef.current.includes('<VIBE_') && !askConfirm
+        ? '⚠️ 이번 답변에서 바뀐 파일이 없어요.' : ''
+      const body = [explanation || (plain.includes('<VIBE_')
+        ? (truncated || !changedAny ? '' : '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.')
+        : plain.trim()), noChangeNote].filter(Boolean).join('\n\n')
       setMessages((prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = {
@@ -993,13 +1061,13 @@ export default function App() {
           ...(contextTokensRef.current ? { ctx: contextTokensRef.current } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
-          ...(Object.keys(files).length > 0 ? { snapshot: projectFilesRef.current, projectType: pType } : {}),
+          ...(changedAny ? { snapshot: projectFilesRef.current, projectType: pType } : {}),
         }
         return updated
       })
       // 프로젝트 파일 자동 저장(내 드라이브). 응답을 막지 않도록 뒤에서 처리한다.
       if (backupId) bindChatProject(backupId, projects.find((p) => p.id === chatProjectIdRef.current))
-      if (USE_DRIVE && driveAutoSave && Object.keys(files).length > 0 && backupId && isDriveConnected()) {
+      if (USE_DRIVE && driveAutoSave && changedAny && backupId && isDriveConnected()) {
         if (hasFileScope()) {
           exportProject(backupId, chatTitle(history), projectFilesRef.current)
             .then((r) => setDriveFolderUrl(r.url))

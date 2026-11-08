@@ -155,6 +155,8 @@ export interface StreamHooks {
   projectContext?: string
   // 코딩 모드: manual 이면 명확한 요청 없이는 파일을 만들지 않고 먼저 확인을 받는다.
   codeMode?: CodeMode
+  // 현재 파일을 어떻게 보낼지. full: 코드 파일 전체(큰 파일·imports/ 데이터는 요약), list: 목록만(필요하면 project_files 로 읽는다)
+  filesMode?: FilesMode
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -189,6 +191,31 @@ export function longPromptThreshold(model: string): number | undefined {
 }
 
 export type CodeMode = 'auto' | 'manual'
+export type FilesMode = 'full' | 'list'
+/** 이보다 큰 파일과 imports/ 아래 데이터 파일은 내용 대신 요약(앞 몇 줄)만 보낸다. */
+export const INLINE_FILE_LIMIT = 20_000
+const isDataFile = (name: string, content: string) => name.startsWith('imports/') || content.length > INLINE_FILE_LIMIT
+const fileMeta = (content: string) => `${content.split('\n').length} lines, ${content.length.toLocaleString('en')} chars`
+/** 이번 메시지가 코드를 만들거나 고치라는 요청인지(수동 모드의 '코딩 진행' 포함). 맞으면 현재 파일 전체를 보낸다. */
+const BUILD_WORDS = /(\[코딩 진행\]|코딩|코드|만들|구현|수정|고쳐|고치|추가|바꿔|바꾸|변경|삭제|지워|없애|리팩|개선|적용|반영|작성|생성|짜\s?줘|html로|페이지로|정리해|build|fix|implement|create|refactor|change|update|add)/i
+export function isBuildRequest(text: string): boolean {
+  return BUILD_WORDS.test(text)
+}
+/** 현재 프로젝트 파일을 대화 중간 system 메시지 본문으로 만든다. */
+export function filesContext(files: Record<string, string>, mode: FilesMode): string {
+  const entries = Object.entries(files)
+  if (!entries.length) return ''
+  if (mode === 'list') {
+    return 'The user has an existing project. File contents are NOT included in this message to save tokens.\n' +
+      'Read a file with the project_files tool (command "read") before answering about its details or before changing it ' +
+      '(when changing a file with <VIBE_FILE>, output its complete new content).\n\nProject files:\n' +
+      entries.map(([n, c]) => `- ${n} (${fileMeta(c)})`).join('\n')
+  }
+  return 'The user is refining their existing project. Current files (output only the files you change):\n\n' +
+    entries.map(([n, c]) => isDataFile(n, c)
+      ? `--- ${n} (${fileMeta(c)}; content omitted — read it with the project_files tool if needed) ---\n${c.split('\n').slice(0, 5).join('\n').slice(0, 600)}\n…`
+      : `--- ${n} ---\n${c}`).join('\n\n')
+}
 /** 코딩 모드 표시: 수동 모드에서 모델이 답변 끝에 붙이면 앱이 '코딩 진행' 버튼을 띄운다. */
 export const CONFIRM_TAG = '<VIBE_CONFIRM/>'
 const BUILD_REQUEST_EXAMPLES = '"코딩해", "만들어 줘", "구현해", "수정해", "고쳐 줘", "추가해", "바꿔 줘", "html로 정리해", "페이지로 만들어"'
@@ -460,12 +487,7 @@ export async function* streamCode(
   hooks = { onThinking, ...hooks }
   // 현재 파일은 대화 이력 '뒤'에 대화 중간 system 메시지로 붙인다. 이력보다 앞(최상위 system)에 두면
   // 파일이 바뀔 때마다 뒤따르는 이력 전체의 캐시가 깨져, 매 턴 이력을 정가로 다시 내게 된다.
-  const currentContext = currentFiles && Object.keys(currentFiles).length > 0
-    ? `The user is refining their existing project. Current files (output only the files you change):\n\n` +
-      Object.entries(currentFiles)
-        .map(([name, content]) => `--- ${name} ---\n${content}`)
-        .join('\n\n')
-    : ''
+  const currentContext = currentFiles ? filesContext(currentFiles, hooks.filesMode ?? 'full') : ''
 
   const info = MODELS.find((m) => m.id === model)
   const fast = options.fast && !!info?.fast
