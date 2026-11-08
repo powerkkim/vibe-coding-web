@@ -718,3 +718,18 @@
 .code-mode-item:hover { background: var(--bg-hover); }
 .code-mode-label { display: block; font-size: var(--fs-sm); font-weight: 600; }
 .code-mode-desc { display: block; margin-top: 2px; font-size: var(--fs-xs); line-height: 1.45; color: var(--txt-3); }
+
+/* 컨텍스트 게이지 */
+.ctx-gauge { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px; border-radius: 8px; background: none; border: none; cursor: pointer; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.ctx-gauge:hover { background: var(--bg-hover); }
+.ctx-pop { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 40; width: 300px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.18); font-size: var(--fs-xs); line-height: 1.55; color: var(--txt); }
+.ctx-pop p { margin: 0; }
+.ctx-pop-head { display: flex; justify-content: space-between; font-weight: 600; font-size: var(--fs-sm); }
+.ctx-bar { height: 6px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
+.ctx-bar > span { display: block; height: 100%; border-radius: 999px; }
+.ctx-pop-new { align-self: flex-start; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-panel); color: var(--txt); cursor: pointer; font-size: var(--fs-xs); }
+.ctx-pop-new:hover { background: var(--bg-hover); }
+.ctx-banner { display: flex; align-items: center; gap: 10px; width: calc(100% - 32px); max-width: 728px; box-sizing: border-box; margin: 0 auto 6px; padding: 8px 12px; border-radius: 10px;
+  font-size: var(--fs-xs); color: var(--txt); background: color-mix(in srgb, var(--err) 10%, transparent); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+.ctx-banner button { flex-shrink: 0; margin-left: auto; height: 26px; padding: 0 10px; border-radius: 999px; border: none; background: var(--accent); color: var(--on-accent); cursor: pointer; font-size: var(--fs-xs); }

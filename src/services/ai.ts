@@ -44,6 +44,8 @@ export interface Message {
   truncated?: 'output' | 'context'
   // 수동 모드에서 코드를 만들기 전에 확인을 받는 답변. 마지막 답변이면 '코딩 진행' 버튼을 띄운다. 화면에만 쓴다.
   confirm?: true
+  // 이 답변의 마지막 요청이 쓴 컨텍스트(입력 전체+출력 토큰). 대화를 다시 열 때 컨텍스트 게이지에 쓴다. 화면에만 쓴다.
+  ctx?: number
   // 서버에서 생성 중인 답변의 생성 id. 응답을 다 받으면 빠진다. 남아 있는 채로 대화를 열면 이어 받는다.
   generationId?: string
 }
@@ -175,6 +177,15 @@ export const MODELS: AIModel[] = [
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
 ]
+
+/**
+ * 컨텍스트 게이지의 기준(권장 한도) 토큰.
+ * 대화가 길수록 매 턴 이전 대화 전체를 다시 보내므로, 실제 모델 한도와 별개로 비용 기준으로 잡는다.
+ * Haiku 는 10만 토큰을 넘으면 단가가 5배가 되므로 그 지점을 기준으로 한다.
+ */
+export function contextBudget(model: string): number {
+  return MODELS.find((m) => m.id === model)?.longPrompt?.overTokens ?? 200_000
+}
 
 export type CodeMode = 'auto' | 'manual'
 /** 코딩 모드 표시: 수동 모드에서 모델이 답변 끝에 붙이면 앱이 '코딩 진행' 버튼을 띄운다. */
