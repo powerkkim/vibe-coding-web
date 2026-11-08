@@ -24,7 +24,7 @@ import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
 import { streamCode, resumeCode, cancelGeneration, parseVibe, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
-import type { ModelOptions } from './services/ai'
+import type { ModelOptions, WebSource } from './services/ai'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
 import { addUsage, estimateCost, loadBalance, loadUsage, resetUsage, setBalance } from './services/usage'
 import type { Balance } from './services/usage'
@@ -412,6 +412,13 @@ export default function App() {
     setAllModelOptions(all)
     try { localStorage.setItem('vibe_model_options', JSON.stringify(all)) } catch { /* 이번 세션만 유지 */ }
   }
+  // 웹 검색 출처(url 기준, 인용된 것 우선)
+  const sourcesRef = useRef(new Map<string, WebSource>())
+  const handleSource = (src: WebSource) => {
+    const prev = sourcesRef.current.get(src.url)
+    if (!prev || (src.cited && !prev.cited)) sourcesRef.current.set(src.url, src)
+  }
+  const handleSearch = (query: string) => handleThinking(`${thinkingRef.current ? '\n' : ''}🔎 "${query}" 검색 중…\n`)
   // 생각 요약을 받으면 본문이 나오기 전의 빈 답변 자리에 붙인다.
   const thinkingRef = useRef('')
   const handleThinking = (text: string) => {
@@ -419,7 +426,7 @@ export default function App() {
     const thinking = thinkingRef.current
     setMessages((prev) => {
       const last = prev[prev.length - 1]
-      if (last?.role !== 'assistant' || last.content) return prev
+      if (last?.role !== 'assistant') return prev
       const updated = [...prev]
       updated[updated.length - 1] = { ...last, thinking }
       return updated
@@ -476,6 +483,7 @@ export default function App() {
     setIsLoading(true)
     bufferRef.current = ''
     thinkingRef.current = ''
+    sourcesRef.current = new Map()
     lastRealtimePatchRef.current = ''
     lastRealtimePatchAtRef.current = 0
     pendingRealtimePatchRef.current = null
@@ -502,7 +510,7 @@ export default function App() {
     try {
       const chunks = resume
         ? resumeCode(activeApiKey, generationId, onUsage, controller.signal)
-        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking)
+        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking, { onSearch: handleSearch, onSource: handleSource })
       for await (const chunk of chunks) {
         bufferRef.current += chunk
         // 응답이 시작되면 진행 중인 답변을 현재 답변으로 표시한다. 본문은 대화에 바로 나온다.
@@ -630,6 +638,8 @@ export default function App() {
           role: 'assistant',
           content: [body, truncatedNote].filter(Boolean).join('\n\n'),
           ...(truncated ? { truncated } : {}),
+          // 인용된 출처를 앞에, 최대 10개
+          ...(sourcesRef.current.size ? { sources: [...sourcesRef.current.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
           ...(Object.keys(files).length > 0 ? { snapshot: projectFilesRef.current, projectType: pType } : {}),

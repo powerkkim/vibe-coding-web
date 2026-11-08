@@ -356,6 +356,25 @@ export default function ChatPanel({ messages, onSend, onStop, onRetry, onContinu
                         </div>
                         )}
                       </>)}
+                  {/* 본문이 이미 나오는 중에 검색을 시작하면 마지막 검색어를 작게 보여준다 */}
+                  {isLoading && i === messages.length - 1 && msg.content && msg.thinking?.includes('🔎') && (
+                    <p role="status" style={{ fontSize: 'var(--fs-xs)', color: 'var(--txt-3)', margin: 0 }}>
+                      {msg.thinking.trim().split('\n').filter((l) => l.startsWith('🔎')).pop()}
+                    </p>
+                  )}
+                  {msg.sources && msg.sources.length > 0 && (
+                    <details className="sources" open={msg.sources.some((s) => s.cited)}>
+                      <summary>출처 {msg.sources.filter((s) => s.cited).length || msg.sources.length}개{msg.sources.some((s) => s.cited) ? '' : ' (검색한 페이지)'}</summary>
+                      <ol>
+                        {(msg.sources.some((s) => s.cited) ? msg.sources.filter((s) => s.cited) : msg.sources).map((src) => (
+                          <li key={src.url}>
+                            <a href={src.url} target="_blank" rel="noopener noreferrer" title={src.url}>{src.title}</a>
+                            <span className="sources-host">{(() => { try { return new URL(src.url).hostname.replace(/^www\./, '') } catch { return '' } })()}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  )}
                   {msg.truncated === 'output' && i === messages.length - 1 && !isLoading && (
                     <button onClick={onContinue} className="self-start"
                       style={{ height: 32, padding: '0 14px', border: '1px solid var(--border)', borderRadius: 999, background: 'var(--bg-panel)', color: 'var(--txt)', fontSize: 'var(--fs-md)', cursor: 'pointer' }}>

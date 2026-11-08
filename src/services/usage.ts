@@ -1,4 +1,4 @@
-import { MODELS } from './ai'
+import { MODELS, WEB_SEARCH_COST } from './ai'
 import type { TokenUsage } from './ai'
 
 /**
@@ -28,7 +28,7 @@ function empty(): UsageTotals {
 }
 
 /** 모델 단가로 계산한 요청 1건의 예상 비용(USD). 모르는 모델이면 0. */
-export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens' | 'fast'>): number {
+export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTokens' | 'cacheWriteTokens' | 'cacheReadTokens' | 'completionTokens' | 'fast' | 'webSearches'>): number {
   const model = MODELS.find((m) => m.id === modelId)
   if (!model) return 0
   // 긴 프롬프트 판정은 캐시 토큰을 포함한 전체 입력 기준이다(Anthropic 가격표).
@@ -43,7 +43,7 @@ export function estimateCost(modelId: string, usage: Pick<TokenUsage, 'promptTok
   const input = uncached * inputRate
     + usage.cacheWriteTokens * inputRate * CACHE_WRITE_MULTIPLIER
     + usage.cacheReadTokens * cacheReadRate
-  return ((input + usage.completionTokens * outputRate) * multiplier) / 1_000_000
+  return ((input + usage.completionTokens * outputRate) * multiplier) / 1_000_000 + (usage.webSearches ?? 0) * WEB_SEARCH_COST
 }
 
 export function loadUsage(): UsageTotals {

@@ -12,8 +12,10 @@ export interface Message {
   files?: Record<string, string>
   projectType?: 'html' | 'react' | 'vue'
   images?: MessageImage[]
-  // 생성 중 생각 요약(모델 옵션 '생각 요약 보기'). 본문이 나오기 전까지만 보여주고 저장 전에 빠진다.
+  // 생성 중 생각 요약(모델 옵션 '생각 요약 보기')·웹 검색 진행 표시. 본문이 나오기 전까지만 보여준다.
   thinking?: string
+  // 웹 검색 출처. 답변이 인용한 페이지(cited)와, 검색했지만 인용하지 않은 페이지. 화면에만 쓰고 API 로는 보내지 않는다.
+  sources?: WebSource[]
   // 이 답변이 끝난 시점의 전체 프로젝트 파일. 버전 되돌리기에만 쓰고 API 로는 보내지 않는다.
   snapshot?: Record<string, string>
   // 응답 도중 오류로 끊긴 답변. 채팅에서 다시 시도 버튼을 띄운다.
@@ -35,6 +37,8 @@ export interface TokenUsage {
   fast?: boolean
   // 응답이 끝난 이유. max_tokens·model_context_window_exceeded 면 응답이 잘린 것이다.
   stopReason?: string
+  // 이번 응답에서 실행한 웹 검색 횟수(검색 1회당 $0.01 별도 과금)
+  webSearches?: number
   limitPerMin: number
   remainingPerMin: number
   resetInSeconds: number
@@ -77,10 +81,31 @@ export interface ModelOptions {
   maxTokens: number
   // 생각 요약(thinking.display = "summarized")을 받아 답변 전까지 보여준다.
   showThinking: boolean
+  // 웹 검색 도구 사용. 최신 정보가 필요할 때 Claude 가 스스로 검색한다.
+  webSearch: boolean
+}
+
+export interface WebSource { url: string; title: string; cited: boolean }
+
+/** 웹 검색 1회 요금(USD). Anthropic 가격표: 1,000회당 $10 */
+export const WEB_SEARCH_COST = 0.01
+/** 한 턴에서 허용하는 최대 검색 횟수 */
+const WEB_SEARCH_MAX_USES = 5
+/** pause_turn(검색이 길어져 서버가 턴을 잠시 멈춤)을 이어 받는 최대 횟수 */
+const MAX_PAUSE_ROUNDS = 4
+
+/** 스트림 부가 이벤트 */
+export interface StreamHooks {
+  // 생각 요약 조각
+  onThinking?: (text: string) => void
+  // 웹 검색 시작(검색어)
+  onSearch?: (query: string) => void
+  // 출처(인용·검색 결과)
+  onSource?: (source: WebSource) => void
 }
 
 export const MAX_TOKEN_CHOICES = [16000, 32000, 64000, 128000]
-export const DEFAULT_MODEL_OPTIONS: ModelOptions = { fast: false, maxTokens: 64000, showThinking: false }
+export const DEFAULT_MODEL_OPTIONS: ModelOptions = { fast: false, maxTokens: 64000, showThinking: false, webSearch: true }
 
 // 첫 항목이 기본 모델이다.
 // 단가 출처: Anthropic 공식 가격표(2026-10 기준). 가격이 바뀌면 여기만 고친다.
@@ -251,6 +276,11 @@ Vue mode rules:
 - Split into .vue SFC components in src/components/
 - Use ref(), reactive(), computed(), onMounted() as needed
 
+## Web search
+- A web_search tool may be available. Use it only when the request needs current or external facts: latest library/CDN versions or APIs, official docs, news, prices, or real data to show in the page.
+- Do not search for ordinary coding you can do from knowledge. Keep searches few and focused.
+- When you used search results, say briefly in <VIBE_EXPLANATION> what you looked up (the app shows the source links).
+
 ## Refining (all modes)
 - Keep the existing design language consistent and change only what was asked
 - Output ONLY the files you create or modify, each with its complete content. Never re-output unchanged files — the app keeps them.
@@ -313,7 +343,9 @@ export async function* streamCode(
   options: ModelOptions = DEFAULT_MODEL_OPTIONS,
   // 생각 요약 조각. options.showThinking 일 때만 온다.
   onThinking?: (text: string) => void,
+  hooks: StreamHooks = {},
 ): AsyncGenerator<string, void, unknown> {
+  hooks = { onThinking, ...hooks }
   // 현재 파일은 대화 이력 '뒤'에 대화 중간 system 메시지로 붙인다. 이력보다 앞(최상위 system)에 두면
   // 파일이 바뀔 때마다 뒤따르는 이력 전체의 캐시가 깨져, 매 턴 이력을 정가로 다시 내게 된다.
   const currentContext = currentFiles && Object.keys(currentFiles).length > 0
@@ -327,7 +359,11 @@ export async function* streamCode(
   const fast = options.fast && !!info?.fast
   // 빠른 모드를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 빠른 모드일 때는 fallback 을 쓰지 않는다.
   const useFallback = (info?.fallback ?? false) && !fast
-  const body = JSON.stringify({
+  const baseMessages = [
+    ...apiMessages(messages),
+    ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
+  ]
+  const request: Record<string, unknown> = {
     model,
     stream: true,
     // 생각과 답변을 합친 한도. 멀티 파일 프로젝트 전체를 한 응답에 담으므로 기본 64K. 스트리밍이라 HTTP 타임아웃 대상이 아니다.
@@ -338,12 +374,12 @@ export async function* streamCode(
     ...(options.showThinking ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
     // 캐시 지점 ①: 고정 시스템 프롬프트
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [
-      ...apiMessages(messages),
-      ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
-    ],
+    messages: baseMessages,
+    // 웹 검색(서버 도구): Anthropic 이 검색을 실행하고 결과를 바로 이어서 답한다. 클라이언트가 할 일은 출처 표시뿐이다.
+    ...(options.webSearch ? { tools: [webSearchTool()] } : {}),
     ...(useFallback ? { fallbacks: 'default' } : {}),
-  })
+  }
+  const body = JSON.stringify(request)
   const headers: Record<string, string> = {
     ...(SERVER_URL ? authHeader(apiKey) : directHeaders(apiKey)),
     'Content-Type': 'application/json',
@@ -352,14 +388,23 @@ export async function* streamCode(
 
   // 서버가 없으면 브라우저에서 Anthropic 으로 바로 보낸다. 끊기면 이어 받을 곳이 없으므로 오류로 끝난다(다시 시도 버튼).
   if (!SERVER_URL) {
-    let direct: Response | null = null
-    for (let attempt = 0; ; attempt++) {
-      direct = await fetch(DIRECT_URL, { method: 'POST', headers, body, signal })
-      if ((direct.status !== 429 && direct.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
-      await sleep(START_RETRY_DELAYS_MS[attempt], signal)
+    // 검색이 길어지면 서버가 stop_reason: pause_turn 으로 턴을 멈춘다. 받은 어시스턴트 내용을 그대로 돌려보내면 이어서 진행한다.
+    const assistantSoFar: unknown[] = []
+    for (let round = 0; ; round++) {
+      const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, { role: 'assistant', content: assistantSoFar }] })
+      let direct: Response | null = null
+      for (let attempt = 0; ; attempt++) {
+        direct = await fetch(DIRECT_URL, { method: 'POST', headers, body: reqBody, signal })
+        if ((direct.status !== 429 && direct.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
+        await sleep(START_RETRY_DELAYS_MS[attempt], signal)
+      }
+      let stop: string | undefined
+      yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false, hooks.onThinking, {
+        ...hooks,
+        onDone: (blocks, stopReason) => { assistantSoFar.push(...blocks); stop = stopReason },
+      })
+      if (stop !== 'pause_turn' || round + 1 >= MAX_PAUSE_ROUNDS) return
     }
-    yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false, onThinking)
-    return
   }
 
   let res: Response | null = null
@@ -374,7 +419,19 @@ export async function* streamCode(
     if ((res.status !== 429 && res.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
     await sleep(START_RETRY_DELAYS_MS[attempt], signal)
   }
-  yield* readGeneration(apiKey, generationId, res, onUsage, signal, true, onThinking)
+  yield* readGeneration(apiKey, generationId, res, onUsage, signal, true, hooks.onThinking, hooks)
+}
+
+/** 웹 검색 도구 정의. 결과를 사용자 위치(시간대)에 맞추도록 대략적인 위치를 준다. */
+function webSearchTool() {
+  let timezone: string | undefined
+  try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone } catch { /* 없으면 생략 */ }
+  return {
+    type: 'web_search_20250305',
+    name: 'web_search',
+    max_uses: WEB_SEARCH_MAX_USES,
+    ...(timezone ? { user_location: { type: 'approximate', timezone, ...(timezone === 'Asia/Seoul' ? { country: 'KR' } : {}) } } : {}),
+  }
 }
 
 /** 브라우저를 닫는 등으로 놓친 생성을 처음부터 다시 받는다. 생성이 이미 끝났으면 저장된 결과를 한 번에 받는다. */
@@ -460,8 +517,14 @@ async function* readGeneration(
   // false 면 끊겨도 다시 요청하지 않는다(서버 없이 Anthropic 을 직접 부를 때).
   canResume = true,
   onThinking?: (text: string) => void,
+  hooks: StreamHooks & { onDone?: (blocks: unknown[], stopReason: string | undefined) => void } = {},
 ): AsyncGenerator<string, void, unknown> {
   const decoder = new TextDecoder()
+  // 이번 응답의 콘텐츠 블록을 그대로 모은다(pause_turn 때 변경 없이 돌려보내야 한다: 생각 서명·검색 결과 암호문 포함).
+  type Block = Record<string, unknown> & { type: string }
+  const blocks: Block[] = []
+  const partialJson: Record<number, string> = {}
+  let webSearches = 0
   let buffer = ''
   let received = 0
   let failures = 0
@@ -488,19 +551,53 @@ async function* readGeneration(
           buffer = buffer.slice(end + 2)
           if (!data) continue
           const event = JSON.parse(data)
-          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') yield event.delta.text
-          else if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') onThinking?.(event.delta.thinking ?? '')
-          else if (event.type === 'message_start') {
+          if (event.type === 'content_block_start') {
+            const block = { ...event.content_block } as Block
+            blocks[event.index] = block
+            if (block.type === 'server_tool_use') partialJson[event.index] = ''
+            if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
+              for (const r of block.content as { type: string; url?: string; title?: string }[]) {
+                if (r.type === 'web_search_result' && r.url) hooks.onSource?.({ url: r.url, title: r.title || r.url, cited: false })
+              }
+            }
+            for (const c of (block.citations as Citation[] | undefined) ?? []) reportCitation(c, hooks)
+          } else if (event.type === 'content_block_delta') {
+            const block = blocks[event.index]
+            const d = event.delta
+            if (d.type === 'text_delta') {
+              if (block) block.text = String(block.text ?? '') + d.text
+              yield d.text
+            } else if (d.type === 'thinking_delta') {
+              if (block) block.thinking = String(block.thinking ?? '') + (d.thinking ?? '')
+              onThinking?.(d.thinking ?? '')
+            } else if (d.type === 'signature_delta') {
+              if (block) block.signature = String(block.signature ?? '') + (d.signature ?? '')
+            } else if (d.type === 'input_json_delta') {
+              partialJson[event.index] = (partialJson[event.index] ?? '') + (d.partial_json ?? '')
+            } else if (d.type === 'citations_delta' && d.citation) {
+              if (block) block.citations = [...((block.citations as unknown[]) ?? []), d.citation]
+              reportCitation(d.citation, hooks)
+            }
+          } else if (event.type === 'content_block_stop') {
+            const block = blocks[event.index]
+            if (block && event.index in partialJson) {
+              try { block.input = JSON.parse(partialJson[event.index] || '{}') } catch { block.input = {} }
+              const query = (block.input as { query?: string }).query
+              if (block.name === 'web_search' && query) hooks.onSearch?.(query)
+            }
+          } else if (event.type === 'message_start') {
             Object.assign(usage, definedNumbers(event.message.usage))
             speed = event.message.usage?.speed ?? speed
           } else if (event.type === 'message_delta') {
             Object.assign(usage, definedNumbers(event.usage))
             speed = event.usage?.speed ?? speed
+            webSearches = event.usage?.server_tool_use?.web_search_requests ?? webSearches
             stopReason = event.delta.stop_reason ?? stopReason
             stopExplanation = event.delta.stop_details?.explanation ?? stopExplanation
           } else if (event.type === 'error') throw new GenerationError(event.error?.message ?? '생성 중 오류가 발생했습니다')
           else if (event.type === 'message_stop') {
-            reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast')
+            reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast', webSearches)
+            hooks.onDone?.(blocks.filter(Boolean), stopReason)
             return
           }
         }
@@ -522,7 +619,12 @@ function definedNumbers(obj: Record<string, unknown> | undefined): Record<string
   return out
 }
 
-function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void, fast = false) {
+type Citation = { type?: string; url?: string; title?: string }
+function reportCitation(c: Citation, hooks: StreamHooks) {
+  if (c?.url) hooks.onSource?.({ url: c.url, title: c.title || c.url, cited: true })
+}
+
+function reportUsage(usage: Record<string, number>, stopReason: string | undefined, explanation: string | undefined, onUsage?: (usage: TokenUsage) => void, fast = false, webSearches = 0) {
   if (stopReason === 'refusal') {
     throw new GenerationError(explanation ? `Claude가 요청을 거절했습니다: ${explanation}` : 'Claude가 요청을 거절했습니다')
   }
@@ -539,6 +641,7 @@ function reportUsage(usage: Record<string, number>, stopReason: string | undefin
     totalTokens: promptTokens + completionTokens,
     fast,
     stopReason,
+    webSearches,
     // Anthropic rate limit 헤더는 서버가 전달하지 않으므로 -1(표시 안 함)로 둔다.
     limitPerMin: -1,
     remainingPerMin: -1,

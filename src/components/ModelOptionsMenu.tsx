@@ -19,7 +19,7 @@ interface Props {
 const fmtTokens = (n: number) => `${Math.round(n / 1000)}K`
 
 export function isCustomized(o: ModelOptions): boolean {
-  return !!o.effort || o.fast || o.maxTokens !== DEFAULT_MODEL_OPTIONS.maxTokens || o.showThinking
+  return !!o.effort || o.fast || o.maxTokens !== DEFAULT_MODEL_OPTIONS.maxTokens || o.showThinking || o.webSearch !== DEFAULT_MODEL_OPTIONS.webSearch
 }
 
 export default function ModelOptionsMenu({ model, options, onChange, disabled }: Props) {
@@ -97,6 +97,17 @@ export default function ModelOptionsMenu({ model, options, onChange, disabled }:
           <section>
             <label className="mopt-row">
               <span>
+                <span className="mopt-label">웹 검색</span>
+                <span className="mopt-desc">최신 라이브러리·문서·데이터가 필요할 때 Claude가 스스로 검색하고 출처를 보여줍니다. 검색 1회당 $0.01 + 결과 토큰 비용 (한 턴 최대 5회).</span>
+              </span>
+              <input type="checkbox" className="mopt-switch" checked={options.webSearch}
+                onChange={(e) => set({ webSearch: e.target.checked })} />
+            </label>
+          </section>
+
+          <section>
+            <label className="mopt-row">
+              <span>
                 <span className="mopt-label">생각 요약 보기</span>
                 <span className="mopt-desc">답변이 나오기 전까지 모델이 무엇을 생각하는지 요약해서 보여줍니다.</span>
               </span>
@@ -118,7 +129,7 @@ export default function ModelOptionsMenu({ model, options, onChange, disabled }:
           </section>
 
           <p className="mopt-desc" style={{ margin: 0 }}>
-            대화 도중 노력 수준·빠른 모드·생각 요약을 바꾸면 대화 이력 캐시가 초기화되어, 바로 다음 요청의 입력 비용이 한 번 늘어납니다.
+            대화 도중 노력 수준·빠른 모드·웹 검색·생각 요약을 바꾸면 대화 이력 캐시가 초기화되어, 바로 다음 요청의 입력 비용이 한 번 늘어납니다.
           </p>
         </div>
       )}

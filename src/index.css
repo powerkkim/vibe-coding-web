@@ -682,3 +682,10 @@
   border-left: 2px solid var(--border); padding: 2px 0 2px 12px; max-height: 9.6em; overflow: hidden;
   display: flex; flex-direction: column-reverse;
 }
+
+/* 웹 검색 출처 */
+.sources { font-size: var(--fs-xs); color: var(--txt-2); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; align-self: stretch; }
+.sources summary { cursor: pointer; color: var(--txt-2); font-weight: 500; }
+.sources ol { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.sources a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-word; }
+.sources-host { margin-left: 6px; color: var(--txt-3); }
