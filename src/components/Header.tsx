@@ -25,6 +25,7 @@ interface Props {
   busy: boolean
   // 결과물이 있는데 미리보기가 닫혀 있을 때만 넘긴다. 누르면 최신 결과물로 미리보기를 연다.
   onOpenPreview?: () => void
+  previewLabel?: string
 }
 
 const ENV_VAR = 'VITE_ANTHROPIC_API_KEY'
@@ -35,7 +36,7 @@ const ENV_VAR = 'VITE_ANTHROPIC_API_KEY'
  * - 오른쪽: API 키 설정 모달, 테마 전환, 새 대화
  * - 모바일/데스크톱 반응형 레이아웃
  */
-export default function Header({ apiKey, model, onApiKeyChange, onModelChange, modelOptions, onModelOptionsChange, isEnvKey, isMobile, sidebarOpen, onToggleSidebar, theme, onToggleTheme, onNewChat, busy, onOpenPreview }: Props) {
+export default function Header({ apiKey, model, onApiKeyChange, onModelChange, modelOptions, onModelOptionsChange, isEnvKey, isMobile, sidebarOpen, onToggleSidebar, theme, onToggleTheme, onNewChat, busy, onOpenPreview, previewLabel = '미리보기' }: Props) {
   const [showModal, setShowModal] = useState(false)  // API 키 설정 모달 표시 여부
   const [draft, setDraft] = useState('')  // 임시 입력 값 (저장 전)
   useEscapeKey(() => setShowModal(false), showModal)
@@ -100,7 +101,7 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
             <button onClick={onOpenPreview} className="flex items-center gap-1.5 transition-colors" aria-label="미리보기 열기"
               style={{ height: 32, padding: isMobile ? '0 10px' : '0 12px', fontSize: 'var(--fs-sm)', color: 'var(--txt)', background: 'var(--bg-hover)', border: 'none', borderRadius: 999, cursor: 'pointer' }}>
               <Eye style={{ width: 15, height: 15 }} aria-hidden="true" />
-              {!isMobile && <span>미리보기</span>}
+              {!isMobile && <span>{previewLabel}</span>}
             </button>
           )}
           <button
