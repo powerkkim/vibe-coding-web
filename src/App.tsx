@@ -31,7 +31,7 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, isBuildRequest, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, isBuildRequest, USE_GENERATION_SERVER, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
 import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
 import { runMemoryCommand } from './services/memoryStore'
@@ -874,7 +874,9 @@ export default function App() {
       clearTimeout(realtimePatchTimerRef.current)
       realtimePatchTimerRef.current = null
     }
-    const placeholder: Message = { role: 'assistant', content: '', files: {} }
+    // 중계 서버를 쓰면 생성 중인 답변에 생성 번호를 남긴다. 앱이 꺼졌다가 다시 열리면 이 번호로 서버에서 이어받는다.
+    const genMark = USE_GENERATION_SERVER ? { generationId } : {}
+    const placeholder: Message = { role: 'assistant', content: '', files: {}, ...genMark }
     setMessages([...history, placeholder])
     unsavedRef.current = true
     // 중지하면 스트리밍 중 반영된 일부 파일 대신 이 상태로 되돌린다.
@@ -890,7 +892,10 @@ export default function App() {
       const partial = explanation || (bufferRef.current.includes('<VIBE_') ? '' : bufferRef.current.trim())
       backupChat({
         id: backupId, title: chatTitle(history), createdAt: chatCreatedAtRef.current || Date.now(), updatedAt: Date.now(),
-        messages: [...history, { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
+        messages: [...history, USE_GENERATION_SERVER
+          // 서버가 계속 받고 있으므로 끊긴 답변이 아니라 '생성 중'으로 남긴다(다시 열면 이어받기).
+          ? { role: 'assistant', content: partial, files: {}, generationId }
+          : { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
         projectFiles: prevFiles, projectType: prevType, githubRepo, projectId: chatProjectIdRef.current,
       })
     }
@@ -959,6 +964,7 @@ export default function App() {
             content: explanation || (hideConfirmTag(bufferRef.current).includes('<VIBE_') ? '생성 중...' : hideConfirmTag(bufferRef.current)),
             files: {},
             ...(thinkingRef.current ? { thinking: thinkingRef.current } : {}),
+            ...genMark,
           }
           return updated
         })
