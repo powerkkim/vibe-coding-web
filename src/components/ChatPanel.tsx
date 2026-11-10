@@ -107,7 +107,7 @@ function lastActivity(thinking?: string) {
 }
 
 /** 코드 실행이 만든 파일 목록. 누르면 Files API 로 받아 저장한다(키는 이 브라우저에서만 쓴다). */
-function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (id: string) => Promise<string> }) {
+export function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDrive?: (id: string) => Promise<string> }) {
   const [state, setState] = useState<Record<string, string>>({})
   const [driveState, setDriveState] = useState<Record<string, string>>({})
   const toDrive = async (id: string) => {
@@ -424,7 +424,7 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
             {messages.map((msg, i) => (
               msg.role === 'user' ? (
                 /* 사용자 메시지: 오른쪽 말풍선 */
-                <div key={i} className="flex flex-col items-end gap-1.5">
+                <div key={i} data-msg-index={i} className="flex flex-col items-end gap-1.5">
                   {msg.docs && msg.docs.length > 0 && (
                     <div className="flex flex-wrap justify-end gap-1.5" style={{ maxWidth: '85%' }}>
                       {msg.docs.map((d, k) => (
@@ -459,7 +459,7 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
                 </div>
               ) : (
                 /* Claude 메시지: 본문은 대화에 바로 보여 주고, 파일을 만든 답변에는 결과물 카드를 붙인다. 오류는 본문 대신 오류 문구만 보여준다. */
-                <div key={i} className="flex flex-col gap-2.5 min-w-0">
+                <div key={i} data-msg-index={i} className="flex flex-col gap-2.5 min-w-0">
                   {!msg.content
                     ? (msg.thinking
                         ? <div className="flex flex-col gap-1.5"><Dots /><div className="thinking-peek" aria-live="polite"><span>{msg.thinking}</span></div></div>

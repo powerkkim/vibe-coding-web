@@ -1,4 +1,5 @@
 ﻿import { useState, useRef, useEffect, useMemo } from 'react'
+import type { ReactNode } from 'react'
 import { Eye, Code2, Copy, Check, ExternalLink, FileCode2, RefreshCw, FileText, FileJson, Palette, GitFork, FolderGit2, KeyRound, History, Download, X, Ellipsis, ChevronLeft, ChevronRight } from '../icons'
 import JSZip from 'jszip'
 import ExportModal from './ExportModal'
@@ -36,9 +37,12 @@ interface Props {
   // 파일 사본 버전 중 지금 띄운 위치(0부터)와 전체 수. 위치를 바꾸면 App 이 확인 후 그 버전으로 되돌린다.
   version: { pos: number; total: number }
   onVersionChange: (pos: number) => void
+  // '파일' 탭: 이 대화의 결과물·첨부·실행 결과 파일 모음(ChatFiles)
+  filesTab: ReactNode
+  filesCount: number
 }
 
-export type PanelTab = 'preview' | 'code'
+export type PanelTab = 'preview' | 'code' | 'files'
 
 type DeploymentHistoryItem = { owner: string; repo: string; branch: string; url: string; deployedAt: number }
 
@@ -169,7 +173,7 @@ function PixelLoadingBar({
   )
 }
 
-export default function PreviewPanel({ files, projectType, isLoading, onImport, onFilesChange, githubRepo, onGithubRepoChange, focus, onClose, version, onVersionChange }: Props) {
+export default function PreviewPanel({ files, projectType, isLoading, onImport, onFilesChange, githubRepo, onGithubRepoChange, focus, onClose, version, onVersionChange, filesTab, filesCount }: Props) {
   const [tab, setTab] = useState<Tab>('preview')
   // ⋯ 메뉴(다운로드·가져오기·배포 URL·배포 기록). 바깥 클릭과 Esc 로 닫는다.
   const [menuOpen, setMenuOpen] = useState(false)
@@ -544,6 +548,7 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
           {/* 컴포넌트(<TabBtn />)로 쓰면 렌더마다 새 타입이 되어 버튼이 다시 만들어지고, 스트리밍 중 클릭이 성립하지 않는다. */}
           {TabBtn({ id: 'preview', icon: Eye, label: '미리보기' })}
           {TabBtn({ id: 'code', icon: Code2, label: `코드${hasFiles ? ` ${fileNames.length}` : ''}` })}
+          {TabBtn({ id: 'files', icon: FolderGit2, label: `파일${filesCount ? ` ${filesCount}` : ''}` })}
         </div>
 
         {version.total > 1 && (
@@ -942,6 +947,9 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
         </div>
 
         {/* Code tab */}
+        <div className={`absolute inset-0 ${tab === 'files' ? 'flex' : 'hidden'} flex-col overflow-y-auto`}>
+          {filesTab}
+        </div>
         <div ref={codeTabRef} className={`absolute inset-0 ${tab === 'code' ? 'flex' : 'hidden'}`}>
           {hasFiles ? (
             <>
@@ -1029,7 +1037,7 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
       </div>
 
       {/* Status bar */}
-      <div className="panel-statusbar flex items-center justify-between px-4 flex-shrink-0 select-none"
+      <div className={`panel-statusbar ${tab === 'files' ? 'hidden' : 'flex'} items-center justify-between px-4 flex-shrink-0 select-none`}
         style={{ background: 'var(--bg-panel)', borderTop: '1px solid var(--border)', height: 24, color: 'var(--txt-3)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' }}>
         <div className="flex items-center gap-2">
           <span style={{ color: 'var(--txt-2)' }}>vibe-coding-web</span>

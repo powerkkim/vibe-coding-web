@@ -16,6 +16,7 @@ import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
 import ProjectModal from './components/ProjectModal'
+import ChatFiles, { chatFileCount } from './components/ChatFiles'
 import { loadProjects, newProject, projectContext, saveProjects } from './services/projectStore'
 import type { Project } from './services/projectStore'
 import { bindChatProject, exportProject, FileScopeError, cleanFileName, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
@@ -1161,6 +1162,7 @@ export default function App() {
 
   // 화면을 빈 대화 상태로 되돌린다. 저장소는 건드리지 않는다.
   const resetConversation = () => {
+    setFilesOnlyOpen(false)
     setMessages([])
     projectFilesRef.current = {}
     setProjectFiles({})
@@ -1259,6 +1261,14 @@ export default function App() {
   const handleOpenPreview = () => {
     const last = messages.map((m) => Object.keys(m.files ?? {}).length > 0).lastIndexOf(true)
     if (last >= 0) return handleOpenAnswer(last)
+    if (!Object.keys(projectFiles).length) {
+      // 결과물 없이 첨부·실행 파일만 있으면 '파일' 탭으로 연다
+      setFilesOnlyOpen(true)
+      setCanvasClosed(false)
+      focusPanel('files')
+      setMobileTab('preview')
+      return
+    }
     setCanvasClosed(false)
     setMobileTab('preview')
   }
@@ -1286,7 +1296,22 @@ export default function App() {
   }
 
   // 결과물(파일)이 생기기 전이나 ✕ 로 닫았을 때는 오른쪽 패널을 숨기고 대화를 화면 가운데에 둔다.
-  const canvasOpen = Object.keys(projectFiles).length > 0 && !canvasClosed
+  // 코드 실행 결과 파일을 드라이브 대화 폴더(outputs/)에 저장
+  const saveOutputToDrive = USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
+              if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
+              if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }
+              const id = genChatIdRef.current ?? chatId
+              if (!id) throw new Error('대화가 없습니다')
+              const { name: fname, blob } = await downloadOutputFile(fid)
+              const url = await saveToProject(id, chatTitle(messages), `outputs/${fname}`, blob)
+              setDriveFolderUrl(url)
+              return url
+            } : undefined
+
+  // 결과물이 없어도 첨부·실행 파일을 보려고 '파일' 탭으로 연 경우
+  const [filesOnlyOpen, setFilesOnlyOpen] = useState(false)
+  const canvasOpen = (Object.keys(projectFiles).length > 0 || filesOnlyOpen) && !canvasClosed
+  const filesCount = chatFileCount(messages)
 
   const sidebar = (
     <Sidebar
@@ -1346,7 +1371,8 @@ export default function App() {
             onToggleTheme={toggleTheme}
             onNewChat={handleNewChat}
             busy={isLoading}
-            onOpenPreview={Object.keys(projectFiles).length > 0 && (canvasClosed || (isMobile && mobileTab === 'chat')) ? handleOpenPreview : undefined}
+            onOpenPreview={(Object.keys(projectFiles).length > 0 || filesCount > 0) && (!canvasOpen || (isMobile && mobileTab === 'chat')) ? handleOpenPreview : undefined}
+            previewLabel={Object.keys(projectFiles).length > 0 ? '미리보기' : `파일 ${filesCount}`}
           />
           {/* ChatPanel 은 가로 줄 안에서 너비를 잡도록 짜여 있어 남은 높이를 채우는 가로 줄로 감싼다. */}
           <div className="flex flex-1 min-h-0">
@@ -1362,16 +1388,7 @@ export default function App() {
             onRetry={handleRetry}
             onContinue={handleContinue}
             onPickDriveFile={USE_DRIVE && isDriveConfigured() && isPickerConfigured() ? pickForAttachment : undefined}
-            onSaveOutputToDrive={USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
-              if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
-              if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }
-              const id = genChatIdRef.current ?? chatId
-              if (!id) throw new Error('대화가 없습니다')
-              const { name: fname, blob } = await downloadOutputFile(fid)
-              const url = await saveToProject(id, chatTitle(messages), `outputs/${fname}`, blob)
-              setDriveFolderUrl(url)
-              return url
-            } : undefined}
+            onSaveOutputToDrive={saveOutputToDrive}
             isLoading={isLoading}
             hasApiKey={!!activeApiKey}
             width={isMobile || !canvasOpen ? undefined : chatWidth}
@@ -1423,6 +1440,8 @@ export default function App() {
             onClose={() => (isMobile ? setMobileTab('chat') : setCanvasClosed(true))}
             version={{ pos: versionPos, total: versions.length }}
             onVersionChange={(pos) => handleRestore(versions[pos])}
+            filesCount={filesCount}
+            filesTab={<ChatFiles messages={messages} onOpenAnswer={handleOpenAnswer} onSaveOutputToDrive={saveOutputToDrive} />}
           />
         </div>
       </div>

@@ -733,3 +733,18 @@
 .ctx-banner { display: flex; align-items: center; gap: 10px; width: calc(100% - 32px); max-width: 728px; box-sizing: border-box; margin: 0 auto 6px; padding: 8px 12px; border-radius: 10px;
   font-size: var(--fs-xs); color: var(--txt); background: color-mix(in srgb, var(--err) 10%, transparent); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
 .ctx-banner button { flex-shrink: 0; margin-left: auto; height: 26px; padding: 0 10px; border-radius: 999px; border: none; background: var(--accent); color: var(--on-accent); cursor: pointer; font-size: var(--fs-xs); }
+
+/* 캔버스 '파일' 탭 */
+.chat-files { padding: 16px 20px 32px; display: flex; flex-direction: column; gap: 20px; font-size: var(--fs-sm); color: var(--txt); }
+.chat-files h3 { margin: 0 0 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--txt-2); }
+.chat-files h3 span { color: var(--txt-3); font-weight: 400; margin-left: 4px; }
+.chat-files ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.chat-files li button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: none; border-radius: 8px; background: none; color: var(--txt); text-align: left; cursor: pointer; }
+.chat-files li button:hover { background: var(--bg-hover); }
+.cf-icon { width: 28px; text-align: center; flex-shrink: 0; }
+.cf-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.cf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-meta { flex-shrink: 0; font-size: var(--fs-xs); color: var(--txt-3); }
+.chat-files-empty { color: var(--txt-3); margin: 24px auto; }
+.msg-flash { animation: msgflash 1.2s ease; border-radius: 12px; }
+@keyframes msgflash { 0%, 60% { background: color-mix(in srgb, var(--accent) 14%, transparent); } 100% { background: transparent; } }
