@@ -1,5 +1,16 @@
 import { SERVER_URL } from './chatStore'
 
+/**
+ * 응답 생성 중계 서버(worker/). 있으면 요청마다 서버가 대신 Anthropic 에 요청하고 원문을 쌓아 둬서,
+ * 폰 앱이 백그라운드로 가거나 브라우저를 닫아도 끝까지 받고 다시 열면 이어 받는다. 대화 저장은 이와 별개(드라이브).
+ */
+const GEN_URL: string | undefined = (import.meta.env.VITE_GENERATION_SERVER_URL as string | undefined) || SERVER_URL
+export const USE_GENERATION_SERVER = !!GEN_URL
+// 생성 id → 지금 진행 중인 라운드 id(도구 왕복마다 요청이 하나씩 늘어난다). 중지할 때 이 라운드를 멈춘다.
+const activeRound = new Map<string, string>()
+/** 한 턴 안 n번째 요청의 생성 id. 0번째는 턴의 생성 id 그대로. */
+const roundId = (id: string, round: number) => (round === 0 ? id : `${id}-${round}`)
+
 // 사용자가 메시지에 넣은 이미지. data 는 data URL 접두어를 뺀 base64 본문이다.
 export interface MessageImage {
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
@@ -494,7 +505,7 @@ export async function* streamCode(
   const built = buildTools(model, options)
   const betas = built.betas
   // 앱 도구는 도구 목록 맨 뒤에 둔다(내용이 고정이라 캐시되는 앞부분에 포함된다).
-  const tools = [...built.tools, ...(SERVER_URL ? [] : hooks.appTools ?? [])]
+  const tools = [...built.tools, ...(hooks.appTools ?? [])]
   const advisorOn = betas.includes(ADVISOR_BETA)
   // 빠른 모드·어드바이저를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 그때는 fallback 을 쓰지 않는다.
   const useFallback = (info?.fallback ?? false) && !fast && !advisorOn
@@ -525,13 +536,14 @@ export async function* streamCode(
   }
   const body = JSON.stringify(request)
   const headers: Record<string, string> = {
-    ...(SERVER_URL ? authHeader(apiKey) : directHeaders(apiKey)),
+    ...(GEN_URL ? authHeader(apiKey) : directHeaders(apiKey)),
     'Content-Type': 'application/json',
     ...((useFallback || betas.length) ? { 'anthropic-beta': [...(useFallback ? ['server-side-fallback-2026-07-01'] : []), ...betas].join(',') } : {}),
   }
 
   // 서버가 없으면 브라우저에서 Anthropic 으로 바로 보낸다. 끊기면 이어 받을 곳이 없으므로 오류로 끝난다(다시 시도 버튼).
-  if (!SERVER_URL) {
+  // 중계 서버가 있으면 요청마다 서버에 맡긴다(요청 id = 생성 id, 이후 라운드는 '-n'). 끊기면 받은 위치부터 이어 받는다.
+  {
     // 한 턴 = 여러 요청일 수 있다.
     // - pause_turn: 서버 도구가 길어져 턴이 잠시 멈춤 → 받은 어시스턴트 내용을 그대로 돌려보내 이어 받는다.
     // - tool_use: 앱 도구(메모리·에디터) 호출 → 앱이 실행하고 tool_result 를 user 메시지로 보내 이어 받는다.
@@ -541,15 +553,24 @@ export async function* streamCode(
     let container: string | undefined
     for (let round = 0; ; round++) {
       const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, ...withTailCache(extra)], ...(container ? { container } : {}) })
+      const rid = roundId(generationId, round)
+      activeRound.set(generationId, rid)
       let direct: Response | null = null
       for (let attempt = 0; ; attempt++) {
-        direct = await fetch(DIRECT_URL, { method: 'POST', headers, body: reqBody, signal })
+        try {
+          direct = await fetch(GEN_URL ? generationUrl(rid) : DIRECT_URL, { method: 'POST', headers, body: reqBody, signal })
+        } catch (e) {
+          // 서버 방식: 응답 헤더 전에 끊겼다. 서버가 이미 시작했을 수 있으므로 이어 받기로 넘긴다(시작 전이면 404 오류).
+          if (!GEN_URL || signal?.aborted) throw e
+          direct = null
+          break
+        }
         if ((direct.status !== 429 && direct.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
         await sleep(START_RETRY_DELAYS_MS[attempt], signal)
       }
       let stop: string | undefined
       let got: Record<string, unknown>[] = []
-      yield* readGeneration(apiKey, generationId, direct, onUsage, signal, false, hooks.onThinking, {
+      yield* readGeneration(apiKey, rid, direct, onUsage, signal, !!GEN_URL, hooks.onThinking, {
         ...hooks,
         onDone: (blocks, stopReason, containerId) => { got = blocks; stop = stopReason; container = containerId ?? container },
       })
@@ -574,19 +595,6 @@ export async function* streamCode(
     }
   }
 
-  let res: Response | null = null
-  for (let attempt = 0; ; attempt++) {
-    try {
-      res = await fetch(generationUrl(generationId), { method: 'POST', headers, body, signal })
-    } catch (e) {
-      // 응답 헤더 전에 끊겼다. 서버가 이미 시작했을 수 있으므로 이어 받기로 넘긴다(시작 전이면 404 오류로 끝난다).
-      if (signal?.aborted) throw e
-      break
-    }
-    if ((res.status !== 429 && res.status < 500) || attempt >= START_RETRY_DELAYS_MS.length) break
-    await sleep(START_RETRY_DELAYS_MS[attempt], signal)
-  }
-  yield* readGeneration(apiKey, generationId, res, onUsage, signal, true, hooks.onThinking, hooks)
 }
 
 /**
@@ -618,8 +626,8 @@ export function buildTools(model: string, options: ModelOptions): { tools: Recor
     betas.push(ADVISOR_BETA)
   }
   // 앱 도구는 앱이 실행·왕복해야 하는데 그 왕복은 직접 호출 경로에만 있다. 서버(Worker) 방식에서는 싣지 않는다.
-  if (!SERVER_URL && options.memory) tools.push({ type: 'memory_20250818', name: 'memory' })
-  if (!SERVER_URL && options.textEditor) tools.push({ type: 'text_editor_20250728', name: 'str_replace_based_edit_tool', max_characters: 20_000 })
+  if (options.memory) tools.push({ type: 'memory_20250818', name: 'memory' })
+  if (options.textEditor) tools.push({ type: 'text_editor_20250728', name: 'str_replace_based_edit_tool', max_characters: 20_000 })
   return { tools, betas }
 }
 
@@ -637,8 +645,24 @@ function webSearchTool() {
 
 /** 브라우저를 닫는 등으로 놓친 생성을 처음부터 다시 받는다. 생성이 이미 끝났으면 저장된 결과를 한 번에 받는다. */
 export function resumeCode(apiKey: string, generationId: string, onUsage?: (usage: TokenUsage) => void, signal?: AbortSignal) {
-  if (!SERVER_URL) return failed(new GenerationError('브라우저가 닫혀 생성이 끊겼습니다. 다시 시도해 주세요'))
-  return readGeneration(apiKey, generationId, null, onUsage, signal)
+  if (!GEN_URL) return failed(new GenerationError('브라우저가 닫혀 생성이 끊겼습니다. 다시 시도해 주세요'))
+  return resumeRounds(apiKey, generationId, onUsage, signal)
+}
+
+/**
+ * 서버에 남은 라운드를 차례로 받는다(도구 왕복 중에 닫혔으면 마지막으로 시작된 라운드까지).
+ * 서버는 라운드 하나만 끝까지 받아 두므로, 앱 도구를 기다리던 턴은 그 직전까지만 이어진다.
+ */
+async function* resumeRounds(apiKey: string, generationId: string, onUsage?: (usage: TokenUsage) => void, signal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  for (let round = 0; ; round++) {
+    const rid = roundId(generationId, round)
+    if (round > 0) {
+      const probe = await fetch(generationUrl(rid, 1e15), { headers: authHeader(apiKey), signal })
+      await probe.body?.cancel().catch(() => {})
+      if (probe.status === 404) return
+    }
+    yield* readGeneration(apiKey, rid, null, onUsage, signal)
+  }
 }
 
 // eslint-disable-next-line require-yield
@@ -647,8 +671,8 @@ async function* failed(err: Error): AsyncGenerator<string, void, unknown> { thro
 /** 서버에서 진행 중인 생성을 멈춘다. 이미 끝났으면 아무 일도 하지 않는다. */
 export async function cancelGeneration(apiKey: string, generationId: string): Promise<void> {
   // 직접 호출 방식은 fetch 를 abort 하면 Anthropic 쪽 생성도 멈춘다.
-  if (!SERVER_URL) return
-  const res = await fetch(generationUrl(generationId), { method: 'DELETE', headers: authHeader(apiKey) })
+  if (!GEN_URL) return
+  const res = await fetch(generationUrl(activeRound.get(generationId) ?? generationId), { method: 'DELETE', headers: authHeader(apiKey) })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
@@ -687,8 +711,8 @@ function authHeader(apiKey: string) {
 }
 
 function generationUrl(id: string, offset?: number) {
-  if (!SERVER_URL) throw new GenerationError('VITE_CHAT_SERVER_URL 이 설정되지 않았습니다')
-  return `${SERVER_URL}/api/generations/${encodeURIComponent(id)}${offset ? `?offset=${offset}` : ''}`
+  if (!GEN_URL) throw new GenerationError('생성 서버 주소(VITE_GENERATION_SERVER_URL)가 설정되지 않았습니다')
+  return `${GEN_URL}/api/generations/${encodeURIComponent(id)}${offset ? `?offset=${offset}` : ''}`
 }
 
 async function httpError(res: Response, fromServer = true): Promise<GenerationError> {
