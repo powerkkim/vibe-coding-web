@@ -22,7 +22,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # wrangler 4 는 Node 22 이상이 필요하다
+          node-version: 22
           cache: 'npm'
           cache-dependency-path: worker/package-lock.json
 

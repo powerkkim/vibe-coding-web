@@ -37,8 +37,9 @@ jobs:
           # 대화 저장 서버(R2). 비워 두면 대화 저장 = Google 드라이브.
           VITE_CHAT_SERVER_URL: ${{ vars.CHAT_SERVER_URL }}
           # 응답 생성 중계 서버(worker/, Cloudflare). 폰 앱이 백그라운드로 가도 서버가 끝까지 받는다.
-          # 레포 변수 GENERATION_SERVER_URL 로 바꿀 수 있고, 'off' 면 브라우저 직접 호출로 돌아간다.
-          VITE_GENERATION_SERVER_URL: ${{ vars.GENERATION_SERVER_URL == 'off' && '' || vars.GENERATION_SERVER_URL || 'https://vibe-chat.powerkkim.workers.dev' }}
+          # 레포 변수 GENERATION_SERVER_URL 로 정할 수 있고, 'off' 면 브라우저 직접 호출로 돌아간다.
+          # 서버(worker) 배포가 확인되기 전까지는 비워 둔다(브라우저 직접 호출).
+          VITE_GENERATION_SERVER_URL: ${{ vars.GENERATION_SERVER_URL == 'off' && '' || vars.GENERATION_SERVER_URL || '' }}
           VITE_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           # Google 선택창(드라이브 파일 가져오기). 없으면 가져오기 기능만 숨겨진다.
           VITE_GOOGLE_API_KEY: ${{ vars.GOOGLE_API_KEY }}
