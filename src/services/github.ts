@@ -407,6 +407,8 @@ export async function createRepoWithFiles(
   token: string,
   repoName: string,
   files: Record<string, string>,
+  // 기본은 비공개. 공개는 사용자가 고를 때만(무료 계정의 GitHub Pages 배포는 공개 저장소만 된다).
+  isPrivate = true,
 ): Promise<{ owner: string; repo: string; branch: string; url: string }> {
   const headers = ghHeaders(token)
   const { login: owner } = await getGitHubUser(token)
@@ -421,7 +423,7 @@ export async function createRepoWithFiles(
     body: JSON.stringify({
       name: repoName,
       description: 'Created with Vibe Coding AI 🚀',
-      private: false,
+      private: isPrivate,
       auto_init: false,
     }),
   })

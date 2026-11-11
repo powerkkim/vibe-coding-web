@@ -39,16 +39,27 @@ const ENV_VAR = 'VITE_ANTHROPIC_API_KEY'
 export default function Header({ apiKey, model, onApiKeyChange, onModelChange, modelOptions, onModelOptionsChange, isEnvKey, isMobile, sidebarOpen, onToggleSidebar, theme, onToggleTheme, onNewChat, busy, onOpenPreview, previewLabel = '미리보기' }: Props) {
   const [showModal, setShowModal] = useState(false)  // API 키 설정 모달 표시 여부
   const [draft, setDraft] = useState('')  // 임시 입력 값 (저장 전)
+  // GitHub 토큰(커밋·푸시·가져오기용). 이 브라우저에만 저장한다. 캔버스의 GitHub 창과 같은 저장 위치를 쓴다.
+  const [ghDraft, setGhDraft] = useState('')
   useEscapeKey(() => setShowModal(false), showModal)
   const dialogRef = useRef<HTMLDivElement>(null)
   useDialogFocus(dialogRef, showModal)
 
   // 모달 열기: 현재 API 키를 draft에 복사하고 모달 표시
-  const open = () => { setDraft(apiKey); setShowModal(true) }
+  const open = () => {
+    setDraft(apiKey)
+    try { setGhDraft(localStorage.getItem('vibe_gh_token') ?? '') } catch { setGhDraft('') }
+    setShowModal(true)
+  }
 
   // API 키 저장: draft 값을 부모 컴포넌트로 전송하고 모달 닫기
   const save = () => {
     onApiKeyChange(draft.trim())
+    try {
+      const gh = ghDraft.trim()
+      if (gh) localStorage.setItem('vibe_gh_token', gh)
+      else localStorage.removeItem('vibe_gh_token')
+    } catch { /* 저장 불가: 무시 */ }
     setShowModal(false)
   }
 
@@ -172,7 +183,7 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
               </div>
               <div>
                 <p style={{ color: 'var(--txt-3)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', marginBottom: 8 }}>
-                  방법 2 — 직접 입력 (브라우저에 저장, 대화 저장 시 서버로 전송)
+                  방법 2 — 직접 입력 (이 브라우저에 저장)
                 </p>
                 <div>
                   <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
@@ -200,7 +211,33 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
                     }}
                   />
                   <p style={{ color: 'var(--txt-3)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', marginTop: 6 }}>
-                    대화를 저장·불러올 때 이 키가 이 사이트의 저장 서버로 전송됩니다. 서버는 키가 유효한지만 확인하고 키를 저장하지 않습니다.
+                    키는 이 브라우저에만 저장됩니다. 답변을 만들 때 응답 중계 서버(Cloudflare)를 거쳐 Anthropic 으로 전달되며, 서버는 키를 저장하지 않습니다.
+                  </p>
+                </div>
+                <div style={{ marginTop: 14 }}>
+                  <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: 'var(--txt-2)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' }}>
+                      GitHub 토큰 <span style={{ color: 'var(--txt-3)', fontSize: 'var(--fs-xs)' }}>(선택)</span>
+                    </span>
+                    <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer"
+                      style={{ color: 'var(--accent)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)' }}>토큰 만들기</a>
+                  </div>
+                  <input type="password" value={ghDraft} aria-label="GitHub 토큰"
+                    onChange={e => setGhDraft(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && save()}
+                    placeholder="github_pat_... 또는 ghp_..."
+                    className="w-full px-3 py-2.5 transition-colors"
+                    style={{
+                      background: 'var(--bg)',
+                      border: '1px solid var(--border)',
+                      color: 'var(--txt)',
+                      caretColor: 'var(--accent)',
+                      fontFamily: 'var(--ui-font)',
+                      fontSize: 'var(--fs-md)',
+                    }}
+                  />
+                  <p style={{ color: 'var(--txt-3)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', marginTop: 6 }}>
+                    넣어 두면 "깃허브에 커밋해 줘"로 Claude 가 커밋·푸시할 수 있어요. 저장소 내용(Contents) 쓰기 권한이 필요합니다. 이 브라우저에만 저장됩니다.
                   </p>
                 </div>
               </div>

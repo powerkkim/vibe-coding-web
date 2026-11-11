@@ -36,6 +36,8 @@ export default function ExportModal({ files, githubRepo: githubRepoProp, onClose
   )
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle')
   const [error, setError] = useState('')
+  // 새 저장소 공개 여부(기본 비공개)
+  const [makePublic, setMakePublic] = useState(false)
   const canExport = !!token.trim() && (githubRepo ? true : !!repoName.trim())
   const backdropPressRef = useRef(false)
 
@@ -56,7 +58,7 @@ export default function ExportModal({ files, githubRepo: githubRepoProp, onClose
         )
         onSuccess(owner, repo, branch, cleanToken)
       } else {
-        const { owner, repo, branch } = await createRepoWithFiles(cleanToken, repoName.trim(), files)
+        const { owner, repo, branch } = await createRepoWithFiles(cleanToken, repoName.trim(), files, !makePublic)
         onSuccess(owner, repo, branch, cleanToken)
       }
     } catch (err) {
@@ -176,6 +178,19 @@ export default function ExportModal({ files, githubRepo: githubRepoProp, onClose
               onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')}
             />
           </div>
+        )}
+
+        {/* 새 저장소일 때만: 공개 여부(기본 비공개) */}
+        {!githubRepo && (
+          <label className="flex items-start gap-2" style={{ fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--txt-2)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={makePublic} onChange={e => setMakePublic(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              공개 저장소로 만들기
+              <span style={{ display: 'block', color: 'var(--txt-3)', fontSize: 'var(--fs-xs)' }}>
+                기본은 비공개예요. 무료 GitHub 계정에서 Pages 배포를 하려면 공개여야 해요.
+              </span>
+            </span>
+          </label>
         )}
 
         {/* File count */}
