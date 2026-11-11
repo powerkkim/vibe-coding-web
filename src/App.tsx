@@ -120,7 +120,7 @@ const APP_TOOLS: Record<string, unknown>[] = [
   },
   {
     name: 'github',
-    description: "Commits and pushes the current project files to the user's GitHub repository. Use it only when the user asks to commit, push, upload or save the code to GitHub. command \"status\" tells whether a GitHub token and repository are connected. command \"commit_push\" uploads every current project file to the connected repository (or creates a new repository named repo_name when none is connected); the app asks the user to confirm first. A GitHub token must be entered once with the GitHub button in the canvas; if it is missing, tell the user to press that button.",
+    description: "Commits and pushes the current project files to the user's GitHub repository. Use it only when the user asks to commit, push, upload or save the code to GitHub. command \"status\" tells whether a GitHub token and repository are connected. command \"commit_push\" uploads every current project file to the connected repository (or creates a new repository named repo_name when none is connected); the app asks the user to confirm first. A GitHub token must be entered once in the app's \"API 키\" settings (top right, GitHub 토큰 field); if it is missing, tell the user to add it there.",
     input_schema: {
       type: 'object',
       properties: {
@@ -630,10 +630,10 @@ export default function App() {
     const files = projectFilesRef.current
     const fileCount = Object.keys(files).length
     if (input.command === 'status') {
-      return { content: `GitHub token: ${token ? 'saved' : 'missing (user must press the GitHub button in the canvas once)'}; repository: ${repo ? `${repo.owner}/${repo.repo} (branch ${repo.branch})` : 'none connected'}; project files: ${fileCount}` }
+      return { content: `GitHub token: ${token ? 'saved' : 'missing (user must add it once in the top-right \"API 키\" settings, GitHub 토큰 field)'}; repository: ${repo ? `${repo.owner}/${repo.repo} (branch ${repo.branch})` : 'none connected'}; project files: ${fileCount}` }
     }
     if (input.command !== 'commit_push') return { content: `Unknown command ${String(input.command)}`, isError: true }
-    if (!token) return { content: 'No GitHub token is saved. Ask the user to press the "GitHub" button at the top of the canvas and enter a personal access token (repo, workflow scopes) once; after that you can push.', isError: true }
+    if (!token) return { content: 'No GitHub token is saved. Ask the user to open the top-right "API 키" settings and enter a GitHub token in the "GitHub 토큰" field once (fine-grained token with Contents write, or classic token with repo scope); after that you can push.', isError: true }
     if (!fileCount) return { content: 'There are no project files to push yet.', isError: true }
     const newName = String(input.repo_name ?? '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
     if (!repo && !newName) return { content: 'No repository is connected. Ask the user for a repository name, then call commit_push with repo_name.', isError: true }
