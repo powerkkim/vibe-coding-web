@@ -180,15 +180,17 @@ export const DEFAULT_MODEL_OPTIONS: ModelOptions = {
 }
 
 // 첫 항목이 기본 모델이다.
-// 단가 출처: Anthropic 공식 가격표(2026-10 기준). 가격이 바뀌면 여기만 고친다.
+// 단가 출처: Anthropic 공식 가격표(2026-11 기준). 가격이 바뀌면 여기만 고친다.
 export const MODELS: AIModel[] = [
   // 빠른 모드 단가: Anthropic Fast mode 문서(2026-11)
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2, defaultEffort: 'medium', fast: { inputPerMTok: 8, outputPerMTok: 40 }, advisors: ['claude-fable-5-1'] },
-  // Fable 5.1: 최상위 모델. 생각(adaptive thinking)이 항상 켜져 있어 첫 글자가 나오기까지 조금 더 걸린다. 생각 블록은 화면에 표시하지 않는다.
-  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, defaultEffort: 'high', advisors: [] },
-  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, defaultEffort: 'high', advisors: ['claude-fable-5-1', 'claude-opus-5-5'] },
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', fallback: true, inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.2, defaultEffort: 'medium', fast: { inputPerMTok: 8, outputPerMTok: 40 }, advisors: ['claude-fable-5-2', 'claude-fable-5-1'] },
+  // Fable 5.2: 최상위 모델(2026-11). 5.1 보다 싸고 빠른 모드가 있다. 생각(adaptive thinking)이 항상 켜져 있어 첫 글자가 나오기까지 조금 더 걸린다.
+  { id: 'claude-fable-5-2', label: 'Claude Fable 5.2', fallback: true, inputPerMTok: 8, outputPerMTok: 40, cacheReadPerMTok: 0.2, defaultEffort: 'high', fast: { inputPerMTok: 16, outputPerMTok: 80 }, advisors: [] },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', fallback: true, inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, defaultEffort: 'high', advisors: ['claude-fable-5-2', 'claude-opus-5-5'] },
   // Haiku 5.5 는 프롬프트(캐시 토큰 포함) 10만 토큰 초과 시 캐시 단가까지 모든 단가가 5배
-  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', fallback: false, inputPerMTok: 0.1, outputPerMTok: 0.5, cacheReadPerMTok: 0.01, longPrompt: { overTokens: 100_000, multiplier: 5 }, defaultEffort: 'medium', advisors: ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5'] },
+  // 이전 최상위 모델(레거시). 5.2 가 더 싸다. 기존 대화·설정 호환용으로 남긴다.
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1 (이전)', fallback: true, inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, defaultEffort: 'high', advisors: [] },
 ]
 
 /** 컨텍스트 게이지의 기준: 모델의 실제 컨텍스트 한도(현재 모델 모두 1M, 문서: build-with-claude/context-windows) */
