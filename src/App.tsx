@@ -126,6 +126,7 @@ const APP_TOOLS: Record<string, unknown>[] = [
       properties: {
         command: { type: 'string', enum: ['status', 'commit_push'] },
         repo_name: { type: 'string', description: 'commit_push only when no repository is connected: name of the new repository to create' },
+        public: { type: 'boolean', description: 'commit_push when creating a new repository: true only if the user explicitly asks for a public repository. Default is private.' },
       },
       required: ['command'],
     },
@@ -637,14 +638,15 @@ export default function App() {
     if (!fileCount) return { content: 'There are no project files to push yet.', isError: true }
     const newName = String(input.repo_name ?? '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
     if (!repo && !newName) return { content: 'No repository is connected. Ask the user for a repository name, then call commit_push with repo_name.', isError: true }
-    const target = repo ? `${repo.owner}/${repo.repo} (${repo.branch} 브랜치)` : `새 저장소 '${newName}'`
+    const makePublic = input.public === true
+    const target = repo ? `${repo.owner}/${repo.repo} (${repo.branch} 브랜치)` : `새 ${makePublic ? '공개' : '비공개'} 저장소 '${newName}'`
     if (!window.confirm(`GitHub ${target}에 파일 ${fileCount}개를 커밋·푸시할까요?`)) {
       return { content: 'The user declined the push. Nothing was uploaded.' }
     }
     try {
       const res = repo
         ? await updateRepoWithFiles(token, repo.owner, repo.repo, repo.branch, files)
-        : await createRepoWithFiles(token, newName, files)
+        : await createRepoWithFiles(token, newName, files, !makePublic)
       handleGithubRepoChange({ owner: res.owner, repo: res.repo, branch: res.branch })
       return { content: `Pushed ${fileCount} files to ${res.owner}/${res.repo} (${res.branch}): ${res.url}` }
     } catch (e) {
