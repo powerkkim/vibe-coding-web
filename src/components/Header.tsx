@@ -183,7 +183,7 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
               </div>
               <div>
                 <p style={{ color: 'var(--txt-3)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', marginBottom: 8 }}>
-                  방법 2 — 직접 입력 (브라우저에 저장, 대화 저장 시 서버로 전송)
+                  방법 2 — 직접 입력 (이 브라우저에 저장)
                 </p>
                 <div>
                   <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
