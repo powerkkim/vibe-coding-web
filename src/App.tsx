@@ -16,6 +16,7 @@ import Sidebar from './components/Sidebar'  // 좌측 대화 목록
 import { backupChat, chatTitle, clearDriveListCache, storageStatusLine, deleteChat, listChats, loadChat, saveChat, savePendingNow, USE_DRIVE } from './services/chatStore'
 import DriveConnectModal from './components/DriveConnectModal'
 import ProjectModal from './components/ProjectModal'
+import { createRepoWithFiles, updateRepoWithFiles } from './services/github'
 import ChatFiles, { chatFileCount } from './components/ChatFiles'
 import { loadProjects, newProject, projectContext, saveProjects } from './services/projectStore'
 import type { Project } from './services/projectStore'
@@ -118,6 +119,18 @@ const APP_TOOLS: Record<string, unknown>[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'github',
+    description: "Commits and pushes the current project files to the user's GitHub repository. Use it only when the user asks to commit, push, upload or save the code to GitHub. command \"status\" tells whether a GitHub token and repository are connected. command \"commit_push\" uploads every current project file to the connected repository (or creates a new repository named repo_name when none is connected); the app asks the user to confirm first. A GitHub token must be entered once with the GitHub button in the canvas; if it is missing, tell the user to press that button.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', enum: ['status', 'commit_push'] },
+        repo_name: { type: 'string', description: 'commit_push only when no repository is connected: name of the new repository to create' },
+      },
+      required: ['command'],
+    },
+  },
+  {
     name: 'project_files',
     description: "Reads, deletes or renames files of the current project (the files listed in the conversation). Use read to see a file whose content was not included (large files, imports/ data, or when only the file list was sent). Use delete/rename only when the user asks to remove or rename a file. To create or rewrite a file, use <VIBE_FILE> instead.",
     input_schema: {
@@ -174,6 +187,9 @@ export default function App() {
   const projectFilesRef = useRef<Record<string, string>>({})
   const [projectType, setProjectType] = useState<'html' | 'react' | 'vue'>('html')
   const [githubRepo, setGithubRepo] = useState<GithubRepo | null>(null)
+  // 도구 실행(스트리밍 중)에서 최신 연결 저장소를 읽기 위해
+  const githubRepoRef = useRef<GithubRepo | null>(null)
+  useEffect(() => { githubRepoRef.current = githubRepo }, [githubRepo])
   const [isLoading, setIsLoading] = useState(false)
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null)
   const [lastCost, setLastCost] = useState(0)
@@ -606,6 +622,36 @@ export default function App() {
   const editedRef = useRef(new Set<string>())
   // 이번 답변에서 파일을 지우거나 이름을 바꿨는지(되돌리기 지점으로 남긴다)
   const structuralChangeRef = useRef(false)
+  // Claude 의 GitHub 커밋·푸시 도구. 캔버스 GitHub 버튼에서 저장한 토큰과 연결 저장소를 쓴다. 푸시 전에 사용자 확인을 받는다.
+  const runGithubTool = async (input: Record<string, unknown>): Promise<ClientToolResult> => {
+    let token = ''
+    try { token = localStorage.getItem('vibe_gh_token') ?? '' } catch { /* 없음 */ }
+    const repo = githubRepoRef.current
+    const files = projectFilesRef.current
+    const fileCount = Object.keys(files).length
+    if (input.command === 'status') {
+      return { content: `GitHub token: ${token ? 'saved' : 'missing (user must press the GitHub button in the canvas once)'}; repository: ${repo ? `${repo.owner}/${repo.repo} (branch ${repo.branch})` : 'none connected'}; project files: ${fileCount}` }
+    }
+    if (input.command !== 'commit_push') return { content: `Unknown command ${String(input.command)}`, isError: true }
+    if (!token) return { content: 'No GitHub token is saved. Ask the user to press the "GitHub" button at the top of the canvas and enter a personal access token (repo, workflow scopes) once; after that you can push.', isError: true }
+    if (!fileCount) return { content: 'There are no project files to push yet.', isError: true }
+    const newName = String(input.repo_name ?? '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+    if (!repo && !newName) return { content: 'No repository is connected. Ask the user for a repository name, then call commit_push with repo_name.', isError: true }
+    const target = repo ? `${repo.owner}/${repo.repo} (${repo.branch} 브랜치)` : `새 저장소 '${newName}'`
+    if (!window.confirm(`GitHub ${target}에 파일 ${fileCount}개를 커밋·푸시할까요?`)) {
+      return { content: 'The user declined the push. Nothing was uploaded.' }
+    }
+    try {
+      const res = repo
+        ? await updateRepoWithFiles(token, repo.owner, repo.repo, repo.branch, files)
+        : await createRepoWithFiles(token, newName, files)
+      handleGithubRepoChange({ owner: res.owner, repo: res.repo, branch: res.branch })
+      return { content: `Pushed ${fileCount} files to ${res.owner}/${res.repo} (${res.branch}): ${res.url}` }
+    } catch (e) {
+      return { content: `GitHub push failed: ${e instanceof Error ? e.message : String(e)}`, isError: true }
+    }
+  }
+
   const runProjectFiles = (input: Record<string, unknown>): ClientToolResult => {
     const files = projectFilesRef.current
     const path = String(input.path ?? '').replace(/^\/+/, '')
@@ -748,6 +794,7 @@ export default function App() {
       return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
     }
     if (name === 'project_files') return runProjectFiles(input)
+    if (name === 'github') return runGithubTool(input)
     if (name === 'str_replace_based_edit_tool') {
       const base = baseProjectRef.current
       const { result, next, changed } = runEditorCommand(projectFilesRef.current, input)
