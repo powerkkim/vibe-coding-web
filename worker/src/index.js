@@ -14,6 +14,7 @@ import { DurableObject } from 'cloudflare:workers'
  *   드라이브 연결을 1시간마다 다시 하지 않게 하는 용도. 갱신 토큰은 서버만 풀 수 있게 암호화해 앱(브라우저)에만 두고,
  *   서버는 아무것도 저장하지 않는다. 필요한 설정: GOOGLE_CLIENT_ID(변수), GOOGLE_CLIENT_SECRET(비밀).
  *
+ * 모든 API 는 허용한 앱 주소(ALLOWED_ORIGINS)에서 온 요청만 받는다(아니면 403).
  * 인증: Authorization: Bearer <Anthropic API 키>. Anthropic 이 받아 주는 키면 통과한다. 키 원문은 저장하지 않는다.
  * 생성은 <sha256(키)>:<생성 id> 로 나눠 다른 키의 생성은 열 수 없다.
  */
@@ -219,11 +220,13 @@ async function googleToken(env, params) {
   return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) }
 }
 
+function isAllowedOrigin(origin, env) {
+  return !!origin && env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).includes(origin)
+}
+
 async function handleGoogleAuth(request, env, action) {
   if (request.method !== 'POST') return new Response(null, { status: 405 })
-  // 허용한 앱 주소(CORS)에서 온 요청만 받는다.
   const origin = request.headers.get('Origin')
-  if (!origin || !env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).includes(origin)) return new Response(null, { status: 403 })
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return Response.json({ error: 'not_configured' }, { status: 501 })
   const input = await request.json().catch(() => ({}))
   if (action === 'exchange') {
@@ -250,6 +253,8 @@ async function handleGoogleAuth(request, env, action) {
 
 async function handle(request, env) {
   const { pathname } = new URL(request.url)
+  // 허용한 앱 주소에서 온 요청만 받는다(다른 사이트가 이 서버를 중계 서버로 쓰지 못하게). 브라우저가 아닌 호출은 Origin 을 꾸밀 수 있어 완전한 차단은 아니다.
+  if (!isAllowedOrigin(request.headers.get('Origin'), env)) return new Response(null, { status: 403 })
   const auth = pathname.match(/^\/api\/auth\/google\/(exchange|refresh)$/)
   if (auth) return handleGoogleAuth(request, env, auth[1])
   const user = await authenticate(request)
@@ -274,7 +279,7 @@ export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin')
     const cors = {}
-    if (origin && env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).includes(origin)) {
+    if (isAllowedOrigin(origin, env)) {
       cors['Access-Control-Allow-Origin'] = origin
       cors['Access-Control-Allow-Headers'] = 'Authorization, Content-Type, Anthropic-Beta'
       cors['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS'
