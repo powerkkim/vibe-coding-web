@@ -44,10 +44,11 @@ const STORAGE_SHIM = `<script>(function(){
 
 /** 미리보기 HTML 맨 앞(다른 스크립트보다 먼저)에 저장소 대체 코드를 넣는다. */
 export function withStorageShim(html: string): string {
-  const head = html.match(/<head[^>]*>/i)
-  if (head) return html.replace(head[0], `${head[0]}\n${STORAGE_SHIM}`)
-  const root = html.match(/<html[^>]*>/i)
-  if (root) return html.replace(root[0], `${root[0]}\n${STORAGE_SHIM}`)
+  // 치환 문자열의 '$' 가 특수 문자로 해석되지 않게 함수로 바꾼다. <head> → <html> → <!DOCTYPE> 순으로 바로 뒤에 넣는다.
+  // (<!DOCTYPE> 앞에 넣으면 브라우저가 구형 호환 모드로 그려 화면이 달라진다.)
+  for (const anchor of [/<head[^>]*>/i, /<html[^>]*>/i, /<!doctype[^>]*>/i]) {
+    if (anchor.test(html)) return html.replace(anchor, (m) => `${m}\n${STORAGE_SHIM}`)
+  }
   return `${STORAGE_SHIM}\n${html}`
 }
 
@@ -70,4 +71,6 @@ export function openSandboxedTab(source: { html: string } | { url: string }, tit
   if ('html' in source) frame.srcdoc = source.html
   else frame.src = source.url
   doc.body.appendChild(frame)
+  // 새 탭에서 앱 창(opener)으로 거슬러 올라가는 연결을 끊는다.
+  try { win.opener = null } catch { /* 무시 */ }
 }
