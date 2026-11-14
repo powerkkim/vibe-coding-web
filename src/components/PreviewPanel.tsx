@@ -8,6 +8,7 @@ import { useEscapeKey } from '../hooks/useEscapeKey'
 import { fetchDeploymentUrl, deployToGitHubPages } from '../services/github'
 import type { GithubRepo } from '../services/chatStore'
 import { highlightCode } from '../services/highlight'
+import { PREVIEW_SANDBOX, withStorageShim, openSandboxedTab } from '../services/previewSandbox'
 
 /**
  * PreviewPanel 컴포넌트: 우측 코드/미리보기 패널
@@ -197,7 +198,6 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
   const [copied, setCopied] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeKey, setIframeKey] = useState(0)
-  const blobUrlRef = useRef<string>('')
   const isImportRef = useRef(false)
   const isEditRef = useRef(false)
   const [showExport, setShowExport] = useState(false)
@@ -251,16 +251,13 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
     }
   }
 
-  // Blob URL for HTML projects
-  const blobUrl = useMemo(() => {
+  // HTML 프로젝트는 파일을 하나로 묶어 격리된 iframe(srcDoc)에서 바로 실행한다. 격리 이유는 services/previewSandbox.ts 참고.
+  const previewHtml = useMemo(() => {
     if (!hasFiles || !files['index.html'] || projectType === 'react' || projectType === 'vue') return ''
-    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
-    const url = URL.createObjectURL(new Blob([bundleFiles(files)], { type: 'text/html' }))
-    blobUrlRef.current = url
-    return url
+    return withStorageShim(bundleFiles(files))
   }, [files, projectType])
 
-  const previewSrc = blobUrl || deployUrl || ''
+  const previewSrc = previewHtml || deployUrl || ''
 
   useEffect(() => {
     if (hasFiles) {
@@ -283,7 +280,6 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
 
   useEffect(() => {
     return () => {
-      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
       if (deployTimeoutRef.current) clearTimeout(deployTimeoutRef.current)
       if (saveBadgeTimerRef.current) clearTimeout(saveBadgeTimerRef.current)
     }
@@ -376,8 +372,9 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
   }
   const refresh = () => setIframeKey(k => k + 1)
   const openNew = () => {
-    const target = blobUrl || deployUrl
-    if (target) window.open(target, '_blank')
+    // 만든 코드는 새 탭에서도 격리해서 연다. 배포된 주소는 사용자가 직접 여는 실제 사이트라 그대로 연다.
+    if (previewHtml) openSandboxedTab({ html: previewHtml })
+    else if (deployUrl) window.open(deployUrl, '_blank', 'noopener,noreferrer')
     else if (githubRepo) window.open(`https://github.com/${githubRepo.owner}/${githubRepo.repo}/deployments`, '_blank')
   }
 
@@ -711,7 +708,8 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
               </div>
             </div>
           ) : previewSrc ? (
-            <iframe key={iframeKey} ref={iframeRef} src={previewSrc}
+            <iframe key={iframeKey} ref={iframeRef} sandbox={PREVIEW_SANDBOX}
+              {...(previewHtml ? { srcDoc: previewHtml } : { src: previewSrc })}
               className="w-full h-full border-0" allow="fullscreen" title="미리보기" />
           ) : deployStep === 'checking' ? (
             <div className="flex-1 flex flex-col items-center justify-center gap-3">
@@ -870,7 +868,7 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
                 </button>
                 {deployUrl && (
                   <button
-                    onClick={() => window.open(deployUrl, '_blank')}
+                    onClick={() => window.open(deployUrl, '_blank', 'noopener,noreferrer')}
                     className="flex items-center gap-1.5 transition-all"
                     style={{ color: 'var(--txt-2)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', padding: '8px 14px', background: 'var(--bg-panel)', border: '1px solid var(--border)', cursor: 'pointer' }}
                   >

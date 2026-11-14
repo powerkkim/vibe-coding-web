@@ -1,6 +1,6 @@
 # CLAUDE.md — vibe-coding-web 작업 안내
 
-Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-14 (앱 v0.3.0 기준).
+Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-14 (앱 v0.3.1 기준).
 
 ## 프로젝트
 
@@ -22,6 +22,8 @@ Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구�
 6. **검증**: 배포 전 Playwright 모의 테스트 + 기존 회귀 테스트를 돌리고 결과를 보고한다. 실제 기기·실계정에서 확인하지 못한 것은 "미확인"이라고 적는다.
 7. **비밀값**: API 키·토큰·클라이언트 비밀값을 코드·커밋·`VITE_*` 변수에 넣지 않는다. `VITE_*` 는 빌드 결과물에 그대로 들어간다.
 
+8. **미리보기 격리**: 미리보기 iframe 의 `sandbox` 를 없애거나 `allow-same-origin` 을 넣지 않는다(`src/services/previewSandbox.ts`). 넣으면 만든 코드가 앱의 키·토큰을 읽을 수 있다. 만든 코드를 앱 주소(같은 출처)에서 직접 실행하는 경로도 만들지 않는다.
+
 ## 구조
 
 ```
@@ -35,8 +37,9 @@ src/
     projectStore.ts       프로젝트(지침·공유 자료) — projects.json
     driveExport.ts        결과물 파일을 내 드라이브 "Vibe Coding/<프로젝트>/<대화>/"에 저장
     github.ts             GitHub 가져오기·커밋·푸시·Pages 배포
+    previewSandbox.ts     미리보기 격리(sandbox 설정, 저장소 대체 코드, 격리된 새 탭)
     memoryStore.ts, usage.ts, localStore.ts …
-public/sw.js              서비스워커: PWA 캐시 + 미리보기 가상 파일(/preview/)
+public/sw.js              서비스워커: PWA 앱 화면 캐시
 worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object) + 구글 로그인 유지
 .github/workflows/        deploy.yml(Pages), worker.yml(Worker)
 ```
@@ -50,7 +53,7 @@ worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object
 | 최근 대화 10개·미업로드 대화 | IndexedDB |
 | API 키, GitHub 토큰(`vibe_gh_token`), 드라이브 토큰·암호화된 갱신 토큰 | localStorage |
 
-Worker 는 대화를 저장하지 않는다. 생성 원문만 24시간 보관 후 삭제.
+Worker 는 대화를 저장하지 않는다. 생성 원문만 24시간 보관 후 삭제. 허용한 앱 주소(`worker/wrangler.toml` 의 `ALLOWED_ORIGINS`)에서 온 요청만 받는다.
 
 ## 배포
 
