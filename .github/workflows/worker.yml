@@ -16,6 +16,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # 단계 조건(if)에서 비밀값 유무를 보려면 작업 수준 env 로 꺼내 둬야 한다.
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,7 +36,17 @@ jobs:
 
       - name: Deploy
         working-directory: worker
-        run: npx wrangler deploy
+        # 구글 클라이언트 ID 는 공개값이라 변수로 넘긴다(드라이브 로그인 유지용).
+        run: npx wrangler deploy ${{ vars.GOOGLE_CLIENT_ID && format('--var GOOGLE_CLIENT_ID:{0}', vars.GOOGLE_CLIENT_ID) || '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      # 드라이브 로그인 유지(갱신 토큰)용 구글 클라이언트 비밀값. 레포 Secret GOOGLE_CLIENT_SECRET 이 있을 때만 넣는다.
+      - name: Set Google client secret
+        working-directory: worker
+        if: ${{ env.GOOGLE_CLIENT_SECRET != '' }}
+        run: printf '%s' "$GOOGLE_CLIENT_SECRET" | npx wrangler secret put GOOGLE_CLIENT_SECRET
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}

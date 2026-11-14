@@ -9,6 +9,11 @@ import { DurableObject } from 'cloudflare:workers'
  * 생성은 Durable Object(Generation)가 Anthropic 에 요청하고 원문을 쌓아 두므로, 브라우저가 끊겨도 끝까지 받는다.
  * 대화 저장은 앱이 구글 드라이브에 한다(이 서버는 대화를 저장하지 않는다). 쌓인 원문은 하루 뒤 지운다.
  *
+ * POST   /api/auth/google/exchange      { code } → 구글 로그인 코드를 액세스 토큰 + 암호화한 갱신 토큰으로 바꾼다
+ * POST   /api/auth/google/refresh       { refresh } → 암호화한 갱신 토큰으로 새 액세스 토큰(1시간)을 받는다
+ *   드라이브 연결을 1시간마다 다시 하지 않게 하는 용도. 갱신 토큰은 서버만 풀 수 있게 암호화해 앱(브라우저)에만 두고,
+ *   서버는 아무것도 저장하지 않는다. 필요한 설정: GOOGLE_CLIENT_ID(변수), GOOGLE_CLIENT_SECRET(비밀).
+ *
  * 인증: Authorization: Bearer <Anthropic API 키>. Anthropic 이 받아 주는 키면 통과한다. 키 원문은 저장하지 않는다.
  * 생성은 <sha256(키)>:<생성 id> 로 나눠 다른 키의 생성은 열 수 없다.
  */
@@ -185,8 +190,68 @@ export class Generation extends DurableObject {
   }
 }
 
+// ── 구글 드라이브 로그인 유지(갱신 토큰) ───────────────────────────
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
+
+/** 갱신 토큰 암호화 키: 클라이언트 비밀값에서 만든다(비밀값을 바꾸면 이전 토큰은 못 풀고, 앱은 한 번 다시 동의받는다). */
+async function refreshKey(env) {
+  const raw = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`vibe-drive-refresh:${env.GOOGLE_CLIENT_SECRET}`))
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
+}
+async function sealRefresh(env, token) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await refreshKey(env), new TextEncoder().encode(token))
+  return `${b64u(iv)}.${b64u(ct)}`
+}
+async function openRefresh(env, sealed) {
+  const [iv, ct] = String(sealed).split('.')
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64u(iv) }, await refreshKey(env), unb64u(ct))
+  return new TextDecoder().decode(pt)
+}
+async function googleToken(env, params) {
+  const res = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, ...params }),
+  })
+  return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) }
+}
+
+async function handleGoogleAuth(request, env, action) {
+  if (request.method !== 'POST') return new Response(null, { status: 405 })
+  // 허용한 앱 주소(CORS)에서 온 요청만 받는다.
+  const origin = request.headers.get('Origin')
+  if (!origin || !env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).includes(origin)) return new Response(null, { status: 403 })
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return Response.json({ error: 'not_configured' }, { status: 501 })
+  const input = await request.json().catch(() => ({}))
+  if (action === 'exchange') {
+    if (typeof input.code !== 'string' || !input.code) return Response.json({ error: 'bad_request' }, { status: 400 })
+    // GIS 팝업(코드 방식)의 redirect_uri 는 문서상 '코드를 받은 페이지의 출처'다. 맞지 않으면 'postmessage' 로 한 번 더 시도한다.
+    let r = await googleToken(env, { grant_type: 'authorization_code', code: input.code, redirect_uri: origin })
+    if (r.body.error === 'redirect_uri_mismatch') r = await googleToken(env, { grant_type: 'authorization_code', code: input.code, redirect_uri: 'postmessage' })
+    if (!r.ok || !r.body.access_token) return Response.json({ error: r.body.error || 'exchange_failed' }, { status: 400 })
+    return Response.json({
+      access_token: r.body.access_token,
+      expires_in: r.body.expires_in,
+      scope: r.body.scope,
+      refresh: r.body.refresh_token ? await sealRefresh(env, r.body.refresh_token) : undefined,
+    })
+  }
+  // refresh
+  let refreshToken
+  try { refreshToken = await openRefresh(env, input.refresh) } catch { return Response.json({ error: 'invalid_grant' }, { status: 401 }) }
+  const r = await googleToken(env, { grant_type: 'refresh_token', refresh_token: refreshToken })
+  // invalid_grant: 사용자가 권한을 끊었거나 비밀번호를 바꿨다 → 앱은 저장한 토큰을 지우고 다시 연결을 띄운다.
+  if (!r.ok || !r.body.access_token) return Response.json({ error: r.body.error || 'refresh_failed' }, { status: r.body.error === 'invalid_grant' ? 401 : 502 })
+  return Response.json({ access_token: r.body.access_token, expires_in: r.body.expires_in, scope: r.body.scope })
+}
+
 async function handle(request, env) {
   const { pathname } = new URL(request.url)
+  const auth = pathname.match(/^\/api\/auth\/google\/(exchange|refresh)$/)
+  if (auth) return handleGoogleAuth(request, env, auth[1])
   const user = await authenticate(request)
   if (!user) return new Response(null, { status: 401 })
 

@@ -30,7 +30,9 @@ interface Props {
   // 대화를 Google 드라이브에 저장할 때만 넘긴다.
   drive?: { configured: boolean; connected: boolean; expired: boolean; account?: string; busy: boolean; onConnect: () => void; onDisconnect: () => void
     // 프로젝트 파일 자동 저장(내 드라이브 Vibe Coding 폴더)과 지금 대화의 폴더 주소
-    autoSave: boolean; onAutoSave: (on: boolean) => void; folderUrl: string | null }
+    autoSave: boolean; onAutoSave: (on: boolean) => void; folderUrl: string | null
+    // 로그인 유지(1시간마다 다시 로그인 안 함). canStaySignedIn: 서버가 있어 켤 수 있음, staySignedIn: 켜져 있음
+    canStaySignedIn?: boolean; staySignedIn?: boolean; onStaySignedIn?: () => void }
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -178,6 +180,10 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
                   프로젝트 파일 드라이브에 저장
                 </label>
                 {drive.folderUrl && <a href={drive.folderUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>이 프로젝트 폴더 열기</a>}
+                {drive.canStaySignedIn && (drive.staySignedIn
+                  ? <span style={{ color: 'var(--txt-3)', marginTop: 2 }}>로그인 유지 중</span>
+                  : <button onClick={drive.onStaySignedIn} disabled={drive.busy} title="한 번만 동의하면 1시간마다 다시 로그인하지 않아요"
+                      style={{ alignSelf: 'flex-start', color: 'var(--accent)', textDecoration: 'underline', marginTop: 2 }}>로그인 유지 켜기</button>)}
               </span>
               <button onClick={drive.onDisconnect} disabled={drive.busy} style={{ color: 'var(--txt-3)', textDecoration: 'underline', flexShrink: 0 }}>연결 해제</button>
             </>
