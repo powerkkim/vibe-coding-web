@@ -65,6 +65,8 @@ export interface TokenUsage {
   // 캐시 쓰기·읽기 토큰을 포함한 전체 입력 토큰
   promptTokens: number
   cacheWriteTokens: number
+  // 캐시 쓰기 중 1시간 캐시로 쓴 토큰(단가가 2배). 없으면 전부 5분 캐시(1.25배)다.
+  cacheWrite1hTokens?: number
   cacheReadTokens: number
   completionTokens: number
   totalTokens: number
@@ -133,6 +135,8 @@ export interface ModelOptions {
   textEditor: boolean
   // 어드바이저(서버, 베타): 지정한 상위 모델에 생성 도중 조언을 구함. 없으면 끔
   advisorModel?: string
+  // 긴 캐시: 캐시 수명을 5분 → 1시간으로. 쓰기 단가는 1.25배 → 2배지만, 5분 넘게 쉬었다 이어 말해도 이력을 다시 쓰지 않는다. 기본 끔.
+  longCache?: boolean
 }
 
 export interface WebSource { url: string; title: string; cited: boolean }
@@ -253,12 +257,10 @@ const SYSTEM_PROMPT = `You are Vibe Coding AI — an expert frontend developer a
 
 If the user is chatting or asking a question rather than requesting something to build or change, reply in plain Korean text with no VIBE tags.
 
-## Browser storage safety
-Apps you build may later be deployed on the same origin as this chatbot, where they share its localStorage and IndexedDB.
-- NEVER call localStorage.clear(), sessionStorage.clear() or indexedDB.deleteDatabase() on databases the app did not create. To reset, remove only the app's own keys.
-- Prefix every storage key and IndexedDB database name with the app's name (e.g. "todo-app:items").
-- NEVER read, write or enumerate keys starting with "vibe_" or "vibe-", and never read storage keys the app did not write.
-- The preview runs isolated, so values saved to localStorage there do not survive a preview reload. That is expected; do not work around it.
+## Browser storage safety (built apps may share an origin with this chatbot)
+- Prefix storage keys and IndexedDB names with the app's name (e.g. "todo-app:items"); touch only the app's own keys.
+- NEVER call localStorage.clear() / sessionStorage.clear(), delete databases the app did not create, or use keys starting with "vibe_".
+- localStorage in the preview resets on reload (isolated preview); that is expected.
 
 ## File downloads
 When the user asks for a file or document (Excel, CSV, PDF, Word, PowerPoint, image, JSON, text, ZIP),
@@ -444,8 +446,12 @@ Generate code only after the user picks or adjusts a direction.
 If the user says to build immediately (e.g. "바로 만들어", "알아서"), skip this step.
 Refinements of an existing project never go through this step.`
 
+type CacheControl = { type: 'ephemeral'; ttl?: '1h' }
+/** 캐시 지점 표시. long 이면 1시간 캐시(문서: build-with-claude/prompt-caching). 수명이 긴 지점이 짧은 지점보다 앞에 와야 한다. */
+const cachePoint = (long?: boolean): CacheControl => (long ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' })
+
 type ApiBlock =
-  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
+  | { type: 'text'; text: string; cache_control?: CacheControl }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'document'; title: string; source: { type: 'base64'; media_type: 'application/pdf'; data: string } | { type: 'text'; media_type: 'text/plain'; data: string } }
 
@@ -462,7 +468,7 @@ function docBlock(d: MessageDoc): ApiBlock {
  * 캐시 지점 ②: 마지막 user 메시지의 마지막 블록. 다음 턴에는 여기까지(시스템 프롬프트 + 이력 + 이미지)가 캐시에서 읽힌다.
  * 화면 전용 필드(files·snapshot·thinking 등)는 보내지 않는다.
  */
-function apiMessages(all: Message[]): { role: 'user' | 'assistant'; content: string | ApiBlock[] }[] {
+function apiMessages(all: Message[], longCache?: boolean): { role: 'user' | 'assistant'; content: string | ApiBlock[] }[] {
   // 오류로 끝난 답변('오류: …')은 모델에 도움이 안 되고 매 턴 토큰만 쓰므로 보내지 않는다.
   // 그 결과 user 가 연달아 와도 API 가 한 턴으로 합친다.
   const messages = all.filter((m) => !(m.role === 'assistant' && m.failed))
@@ -471,7 +477,7 @@ function apiMessages(all: Message[]): { role: 'user' | 'assistant'; content: str
     const blocks: ApiBlock[] = [
       ...(m.images ?? []).map((img) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: img.mediaType, data: img.data } })),
       ...(m.docs ?? []).map(docBlock),
-      { type: 'text' as const, text: m.content || '(내용 없음)', ...(i === lastUser ? { cache_control: { type: 'ephemeral' as const } } : {}) },
+      { type: 'text' as const, text: m.content || '(내용 없음)', ...(i === lastUser ? { cache_control: cachePoint(longCache) } : {}) },
     ]
     return { role: m.role, content: blocks.length === 1 && i !== lastUser ? m.content || '(내용 없음)' : blocks }
   })
@@ -519,7 +525,7 @@ export async function* streamCode(
   // 빠른 모드·어드바이저를 지원하지 않는 모델로 넘어가면 요청이 실패할 수 있어, 그때는 fallback 을 쓰지 않는다.
   const useFallback = (info?.fallback ?? false) && !fast && !advisorOn
   const baseMessages = [
-    ...apiMessages(messages),
+    ...apiMessages(messages, options.longCache),
     ...(currentContext ? [{ role: 'system' as const, content: currentContext }] : []),
   ]
   const request: Record<string, unknown> = {
@@ -534,8 +540,8 @@ export async function* streamCode(
     // 캐시 지점 ①: 고정 시스템 프롬프트
     // 캐시 지점 ①-2: 프로젝트 지침·공유 자료(같은 프로젝트 안에서는 바뀌지 않아 캐시로 읽힌다)
     system: [
-      { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-      ...(hooks.projectContext ? [{ type: 'text', text: hooks.projectContext, cache_control: { type: 'ephemeral' } }] : []),
+      { type: 'text', text: SYSTEM_PROMPT, cache_control: cachePoint(options.longCache) },
+      ...(hooks.projectContext ? [{ type: 'text', text: hooks.projectContext, cache_control: cachePoint(options.longCache) }] : []),
       ...(hooks.codeMode ? [{ type: 'text', text: CODE_MODE_RULES[hooks.codeMode] }] : []),
     ],
     messages: baseMessages,
@@ -834,6 +840,7 @@ async function* readGeneration(
           } else if (event.type === 'message_start') {
             container = event.message.container?.id ?? container
             Object.assign(usage, definedNumbers(event.message.usage))
+            if (typeof event.message.usage?.cache_creation?.ephemeral_1h_input_tokens === 'number') usage.cache_write_1h = event.message.usage.cache_creation.ephemeral_1h_input_tokens
             speed = event.message.usage?.speed ?? speed
           } else if (event.type === 'message_delta') {
             Object.assign(usage, definedNumbers(event.usage))
@@ -928,12 +935,14 @@ function reportUsage(usage: Record<string, number>, stopReason: string | undefin
   }
   // input_tokens 는 캐시 토큰을 뺀 값이라 캐시 쓰기·읽기를 더해야 전체 입력이 된다.
   const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0
+  const cacheWrite1hTokens = Math.min(cacheWriteTokens, usage.cache_write_1h ?? 0)
   const cacheReadTokens = usage.cache_read_input_tokens ?? 0
   const promptTokens = (usage.input_tokens ?? 0) + cacheWriteTokens + cacheReadTokens
   const completionTokens = usage.output_tokens ?? 0
   onUsage?.({
     promptTokens,
     cacheWriteTokens,
+    ...(cacheWrite1hTokens ? { cacheWrite1hTokens } : {}),
     cacheReadTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,

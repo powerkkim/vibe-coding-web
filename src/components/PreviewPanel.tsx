@@ -1,7 +1,6 @@
 ﻿import { useState, useRef, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Eye, Code2, Copy, Check, ExternalLink, FileCode2, RefreshCw, FileText, FileJson, Palette, GitFork, FolderGit2, KeyRound, History, Download, X, Ellipsis, ChevronLeft, ChevronRight } from '../icons'
-import JSZip from 'jszip'
 import ExportModal from './ExportModal'
 import ImportModal from './ImportModal'
 import { useEscapeKey } from '../hooks/useEscapeKey'
@@ -237,6 +236,8 @@ export default function PreviewPanel({ files, projectType, isLoading, onImport, 
   // 파일 이름의 '/' 는 JSZip 이 폴더로 만든다(src/App.jsx → src 폴더).
   const downloadZip = async () => {
     try {
+      // ZIP 라이브러리는 내려받을 때만 불러온다(첫 화면 로딩을 가볍게).
+      const { default: JSZip } = await import('jszip')
       const zip = new JSZip()
       for (const [name, content] of Object.entries(files)) zip.file(name, content)
       const url = URL.createObjectURL(await zip.generateAsync({ type: 'blob' }))

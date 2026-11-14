@@ -748,3 +748,29 @@
 .chat-files-empty { color: var(--txt-3); margin: 24px auto; }
 .msg-flash { animation: msgflash 1.2s ease; border-radius: 12px; }
 @keyframes msgflash { 0%, 60% { background: color-mix(in srgb, var(--accent) 14%, transparent); } 100% { background: transparent; } }
+
+/* 대화를 위로 올려 보고 있을 때 입력창 위에 뜨는 '맨 아래로' 버튼 */
+.to-bottom-btn {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  width: 34px; height: 34px; border-radius: 17px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-panel); color: var(--txt-2);
+  border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(20,20,19,0.14);
+  cursor: pointer; z-index: 5;
+}
+.to-bottom-btn:hover { color: var(--txt); background: var(--bg-hover, var(--bg-panel)); }
+
+/* 다른 대화의 답변이 끝났을 때 화면 오른쪽 위에 잠깐 뜨는 알림 */
+.toast-stack { position: fixed; top: 12px; right: 12px; z-index: 60; display: flex; flex-direction: column; gap: 8px; max-width: min(340px, calc(100vw - 24px)); }
+.toast {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  background: var(--bg-panel); color: var(--txt); font-size: var(--fs-sm);
+  border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 4px 16px rgba(20,20,19,0.16);
+}
+.toast-open { flex: 1; min-width: 0; text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.toast-open span:first-child { font-weight: 500; }
+.toast-open span:last-child { color: var(--txt-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 사이드바 아래: 버전과 한 줄 공지, 알림 설정 */
+.sidebar-notice { padding: 8px 12px; border-top: 1px solid var(--border); font-size: var(--fs-xs); color: var(--txt-3); display: flex; flex-direction: column; gap: 4px; }
+.sidebar-notice b { color: var(--txt-2); font-weight: 500; }

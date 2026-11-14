@@ -1,5 +1,5 @@
-﻿import { useState, useRef, useEffect } from 'react'
-import { ArrowUp, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
+﻿import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import { ArrowUp, ChevronDown, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
 import AnswerView from './AnswerView'
 import type { CodeMode, Message, MessageImage, TokenUsage } from '../services/ai'
 import type { PickerDoc } from '../services/driveExport'
@@ -44,6 +44,8 @@ interface Props {
   codeMode: CodeMode
   // 컨텍스트 게이지: 지금 대화가 차지한 토큰과 기준(권장 한도). 새 대화로 갈아타기 버튼에 onNewChat 을 쓴다.
   contextTokens: number
+  /** 지금 열린 대화(새 대화는 'new'). 바뀌면 애니메이션 없이 바로 맨 아래를 보여 준다. */
+  chatKey: string
   contextBudget: number
   // 이 토큰을 넘으면 단가가 오르는 모델(Haiku)일 때만
   priceJumpAt?: number
@@ -158,7 +160,7 @@ export function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDri
   )
 }
 
-export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, onNewChat, codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ chatKey, contextTokens, contextBudget, priceJumpAt, onNewChat, codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -171,7 +173,6 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
     else if (Number.isFinite(v) && v >= 0) onBalanceChange(v)
     setBalanceDraft(null)
   }
-  const bottomRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   // 보내기 전 이미지(🖼 버튼·붙여넣기·끌어다 놓기로 추가)
   const [images, setImages] = useState<MessageImage[]>([])
@@ -190,8 +191,44 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
   const [imageError, setImageError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // 결과물 창이 열리거나 닫혀 폭이 바뀌면 글이 다시 줄바꿈되므로 그때도 맨 아래로 내린다. 드래그로 폭을 조절할 때는 내리지 않는다.
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, width === undefined])
+  // ── 스크롤 ──
+  // 맨 아래 근처를 보고 있을 때만 새 내용을 따라 내려간다(follow). 사용자가 위로 올리면 멈추고 '맨 아래로' 버튼을 띄운다.
+  // 따라 내려갈 때는 애니메이션 없이 바로 옮긴다: 부드러운 스크롤은 도중의 위치가 '위로 올린 것'으로 읽혀 따라가기가 풀리고, 대화를 열 때 맨 위부터 훑는 것처럼 보인다.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef(true)
+  const [atBottom, setAtBottom] = useState(true)
+  const NEAR_BOTTOM_PX = 48
+  const toBottom = (smooth = false) => {
+    const el = scrollRef.current
+    if (!el) return
+    followRef.current = true
+    setAtBottom(true)
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+  }
+  // '맨 아래로' 버튼으로 부드럽게 내려가는 중인지. 그동안의 도중 위치는 '위로 올린 것'으로 보지 않는다. 사용자가 휠·터치로 끼어들면 푼다.
+  const smoothingRef = useRef(false)
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX
+    if (smoothingRef.current && !near) return
+    smoothingRef.current = false
+    followRef.current = near
+    setAtBottom(near)
+  }
+  // 대화를 열거나 바꿨을 때: 바로 맨 아래.
+  useLayoutEffect(() => { smoothingRef.current = false; toBottom() }, [chatKey])
+  // 새 내용이 오거나, 결과물 창이 열리고 닫혀 폭이 바뀌어 글이 다시 줄바꿈될 때: 따라가는 중이면 맨 아래로. 드래그로 폭을 조절할 때는 내리지 않는다.
+  useLayoutEffect(() => { if (followRef.current) toBottom() }, [messages, width === undefined])
+  // 코드 강조·이미지처럼 나중에 높이가 늘어나는 경우에도 따라간다.
+  useEffect(() => {
+    const el = scrollRef.current
+    const content = el?.firstElementChild
+    if (!el || !content || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => { if (followRef.current) el.scrollTop = el.scrollHeight })
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [chatKey, messages.length === 0])
 
   // 남은 칸만큼만 받고, 형식이 맞지 않거나 읽기에 실패한 파일은 메시지로 알린다.
   const addImageFiles = async (files: File[]) => {
@@ -227,6 +264,7 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
     const t = input.trim()
     // 생성 중에 보내면 '끼어들어 말하기': 지금 답변을 멈추고 이 메시지를 이어서 보낸다(App 이 처리).
     if ((!t && images.length === 0 && driveFiles.length === 0) || !hasApiKey) return
+    followRef.current = true   // 내가 보낸 메시지와 그 답변은 따라간다
     onSend(t, images, driveFiles); setInput(''); setImages([]); setDriveFiles([]); setImageError('')
     if (taRef.current) taRef.current.style.height = 'auto'
   }
@@ -383,7 +421,8 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
         </div>
       )}
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="flex-1 min-h-0 flex flex-col" style={{ position: 'relative' }}>
+      <div ref={scrollRef} onScroll={onScroll} onWheel={() => { smoothingRef.current = false }} onTouchStart={() => { smoothingRef.current = false }} className="flex-1 overflow-y-auto min-h-0">
         {messages.length === 0 ? (
           <div className="flex flex-col h-full items-center justify-center gap-4 px-3 pb-16">
             {/* 빈 화면: 제목 → 입력창 → 추천 순서로 가운데에 둔다. */}
@@ -548,8 +587,13 @@ export default function ChatPanel({ contextTokens, contextBudget, priceJumpAt, o
                 <Dots />
               </div>
             )}
-            <div ref={bottomRef} />
           </div>
+        )}
+      </div>
+        {messages.length > 0 && !atBottom && (
+          <button onClick={() => { smoothingRef.current = true; toBottom(true) }} className="to-bottom-btn" aria-label="맨 아래로" title="맨 아래로">
+            <ChevronDown style={{ width: 18, height: 18 }} />
+          </button>
         )}
       </div>
 

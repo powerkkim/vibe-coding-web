@@ -23,7 +23,7 @@ const fmtTokens = (n: number) => `${Math.round(n / 1000)}K`
 export function isCustomized(o: ModelOptions): boolean {
   const d = DEFAULT_MODEL_OPTIONS
   return !!o.effort || o.fast || o.maxTokens !== d.maxTokens || o.showThinking || !!o.advisorModel
-    || o.webSearch !== d.webSearch || o.webFetch !== d.webFetch || o.codeExecution !== d.codeExecution || o.memory !== d.memory || o.textEditor !== d.textEditor
+    || o.webSearch !== d.webSearch || o.webFetch !== d.webFetch || o.codeExecution !== d.codeExecution || o.memory !== d.memory || o.textEditor !== d.textEditor || !!o.longCache
 }
 
 export default function ModelOptionsMenu({ model, options, onChange, disabled }: Props) {
@@ -113,6 +113,14 @@ export default function ModelOptionsMenu({ model, options, onChange, disabled }:
                     onChange={(e) => set({ [t.key]: e.target.checked } as Partial<ModelOptions>)} />
                 </label>
               ))}
+              <label className="mopt-row">
+                <span>
+                  <span className="mopt-label" style={{ fontWeight: 500 }}>긴 캐시 (1시간)</span>
+                  <span className="mopt-desc">대화 이력을 1시간 동안 캐시합니다. 답변을 확인하느라 5분 넘게 쉬었다 이어 말해도 이력을 다시 쓰지 않아 긴 대화일수록 입력 비용이 줄어요. 대신 새로 쓰는 부분의 단가가 1.25배 → 2배라, 5분 안에 빠르게 주고받는 짧은 대화는 조금 더 듭니다.</span>
+                </span>
+                <input type="checkbox" className="mopt-switch" checked={!!options.longCache}
+                  onChange={(e) => set({ longCache: e.target.checked })} />
+              </label>
               {options.memory && (
                 <button className="mopt-reset" style={{ alignSelf: 'flex-start' }} onClick={() => { setOpen(false); setMemoryOpen(true) }}>기억 보기·편집</button>
               )}

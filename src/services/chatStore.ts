@@ -61,6 +61,13 @@ export type ChatListItem = ChatSummary & { pending?: boolean; driveOnly?: boolea
 
 // 대화 id → 드라이브 파일 id. 목록을 받을 때 채운다.
 const driveIds = new Map<string, string>()
+// 이번 실행에서 새로 만든 파일(대화 id → 만든 시각). 그보다 먼저 출발한 목록 요청의 응답에는 이 파일이 없으므로,
+// 목록으로 driveIds 를 다시 채울 때 지워지지 않게 한다(지워지면 다음 저장이 같은 대화 파일을 하나 더 만든다).
+const createdAt = new Map<string, number>()
+// 대화별 저장 줄 세우기: 같은 대화의 저장이 겹치면 둘 다 '파일 없음'으로 보고 파일을 둘 만들 수 있다.
+const saveChains = new Map<string, Promise<boolean>>()
+// 이번 실행에서 대화별로 마지막에 올린 수정 시각. 더 옛 내용(늦게 도착한 백업 복구 등)이 최신 내용을 덮어쓰지 않게 한다.
+const lastSavedAt = new Map<string, number>()
 const PREFIX = 'chat-'
 const fileName = (id: string) => `${PREFIX}${id}.json`
 const LIST_CACHE_KEY = 'vibe_gdrive_list_cache'
@@ -93,8 +100,11 @@ const byRecent = (a: ChatSummary, b: ChatSummary) => b.updatedAt - a.updatedAt
 
 /** 드라이브 파일 목록 → 대화 요약. 같은 대화 파일이 여러 개면(예전 버전에서 생긴 중복) 가장 최신 것을 쓴다. */
 async function driveList(): Promise<ChatSummary[]> {
+  const startedAt = Date.now()
   const files = await listFiles(PREFIX)
   const best = new Map<string, ChatSummary>()
+  // 이 목록 요청이 출발한 뒤에 만들어진 파일은 응답에 없을 수 있으니 따로 챙겨 둔다.
+  const justCreated = [...driveIds].filter(([id]) => (createdAt.get(id) ?? 0) >= startedAt)
   driveIds.clear()
   for (const f of files) {
     if (!f.name.endsWith('.json')) continue
@@ -105,6 +115,7 @@ async function driveList(): Promise<ChatSummary[]> {
     best.set(id, { id, title: f.appProperties?.title ?? '', updatedAt, ...(f.appProperties?.projectId ? { projectId: f.appProperties.projectId } : {}) })
     driveIds.set(id, f.id)
   }
+  for (const [id, fid] of justCreated) if (!driveIds.has(id)) driveIds.set(id, fid)
   const list = [...best.values()].sort(byRecent)
   writeListCache(list)
   return list
@@ -115,13 +126,28 @@ async function driveId(id: string): Promise<string | undefined> {
   return driveIds.get(id)
 }
 
-async function driveSave(chat: StoredChat) {
+/** 드라이브에 저장한다. 같은 대화의 저장은 앞의 것이 끝난 뒤에 차례로 한다. 더 최신 내용이 이미 올라가 있어 건너뛰었으면 false. */
+function driveSave(chat: StoredChat): Promise<boolean> {
+  const prev = saveChains.get(chat.id) ?? Promise.resolve()
+  const job = prev.catch(() => false).then(() => driveSaveNow(chat))
+  saveChains.set(chat.id, job)
+  job.catch(() => {}).finally(() => { if (saveChains.get(chat.id) === job) saveChains.delete(chat.id) })
+  return job
+}
+
+async function driveSaveNow(chat: StoredChat): Promise<boolean> {
+  // 이미 더 최신 내용을 올렸으면 옛 내용으로 덮어쓰지 않는다.
+  if ((lastSavedAt.get(chat.id) ?? 0) > chat.updatedAt) return false
   // appProperties 는 키+값 124바이트 한도라 제목을 짧게 자른다.
   // projectId 는 목록에서 프로젝트별로 묶기 위해 함께 둔다(빈 값이면 프로젝트 밖).
   const props = { title: fitBytes(chat.title, 110), updatedAt: String(chat.updatedAt), projectId: chat.projectId ?? '' }
-  const fid = await writeFile(fileName(chat.id), JSON.stringify(chat), props, await driveId(chat.id))
+  const existing = await driveId(chat.id)
+  const fid = await writeFile(fileName(chat.id), JSON.stringify(chat), props, existing)
+  if (!existing) createdAt.set(chat.id, Date.now())
   driveIds.set(chat.id, fid)
+  lastSavedAt.set(chat.id, chat.updatedAt)
   updateListCache((l) => [summary(chat), ...l.filter((c) => c.id !== chat.id)])
+  return true
 }
 
 /** 브라우저에 대기 중인 대화를 드라이브로 올린다. 드라이브 쪽이 더 최신이면 올리지 않고 브라우저 사본만 지운다. */
@@ -132,11 +158,13 @@ async function syncPending(remote: ChatSummary[]): Promise<ChatSummary[]> {
   const remoteById = new Map(remote.map((c) => [c.id, c]))
   for (const { synced: _s, account: _a, ...chat } of pending) {
     const r = remoteById.get(chat.id)
+    // 그사이 더 최신 내용이 올라갔으면(false) 이 옛 사본으로 백업·목록을 덮어쓰지 않는다.
+    let saved = true
     if (!r || chat.updatedAt > r.updatedAt) {
-      await driveSave(chat)
-      remoteById.set(chat.id, summary(chat))
+      saved = await driveSave(chat)
+      if (saved) remoteById.set(chat.id, summary(chat))
     }
-    await backupChat(chat, true)
+    if (saved) await backupChat(chat, true)
     await localDelete(chat.id)
   }
   const list = [...remoteById.values()].sort(byRecent)
@@ -161,7 +189,8 @@ async function recoverFromBackup(remote: ChatSummary[]): Promise<ChatSummary[]> 
       continue
     }
     try {
-      await driveSave(b)
+      // 그사이 더 최신 내용이 올라갔으면(false) 이 옛 백업으로 덮어쓰지 않는다.
+      if (!(await driveSave(b))) continue
       await backupChat(b, true)
       byId.set(b.id, { ...summary(b), updatedAt: Math.max(b.updatedAt, r?.updatedAt ?? 0) })
       changed = true
@@ -260,8 +289,7 @@ export async function saveChat(apiKey: string, chat: StoredChat): Promise<'drive
     const pending: LocalCopy = { ...chat, account: currentAccount() }
     if (usingLocal()) { await localPut(pending); return 'local' }
     try {
-      await driveSave(chat)
-      await backupChat(chat, true)
+      if (await driveSave(chat)) await backupChat(chat, true)
       await localDelete(chat.id)   // 예전 대기본이 있으면 정리
       return 'drive'
     } catch {
@@ -297,6 +325,8 @@ export async function deleteChat(apiKey: string, id: string): Promise<void> {
     const files = (await listFiles(fileName(id))).filter((f) => f.name === fileName(id))
     for (const f of files) await removeFile(f.id)
     driveIds.delete(id)
+    createdAt.delete(id)
+    lastSavedAt.delete(id)
     updateListCache((l) => l.filter((c) => c.id !== id))
     return
   }

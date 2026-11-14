@@ -27,6 +27,9 @@ import { canDriveStaySignedIn, connectDrive, disconnectDrive, driveAccount, driv
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
+import { notifyEnabled, notifySupported, onNotificationOpen, setNotifyEnabled, showSystemNotification } from './services/notify'
+import { RELEASE_NOTE } from './releaseNote'
+import { X } from './icons'
 import Header from './components/Header'  // 상단 헤더 (로고, 설정, API 키)
 import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
@@ -104,6 +107,46 @@ function fingerprintFiles(files: Record<string, string>): string {
  * 과도한 리렌더링 방지를 위한 성능 최적화
  */
 const REALTIME_PATCH_THROTTLE_MS = 150
+// 앱 안 알림(토스트)이 떠 있는 시간
+const TOAST_MS = 8000
+// 탭 제목 원본(버전 포함). 새 답변이 있으면 앞에 개수를 붙인다.
+const BASE_TITLE = document.title
+
+/**
+ * 진행 중인 생성 1건. 대화마다 하나씩, 여러 대화에서 동시에 돌 수 있다.
+ * 생성 중인 대화의 메시지·파일은 화면(React 상태)이 아니라 이 객체가 원본이다.
+ * 그 대화가 화면에 떠 있을 때만 화면에 반영하고, 뒤에서 끝나면 스스로 저장한다.
+ */
+interface Run {
+  chatId: string
+  /** 지금 서버에서 돌고 있는 생성 id(형식 보정 중에는 보정 요청의 id). 중지할 때 쓴다. */
+  generationId: string
+  controller: AbortController
+  history: Message[]
+  messages: Message[]
+  files: Record<string, string>
+  type: ProjectType
+  githubRepo: GithubRepo | null
+  projectId: string | null
+  createdAt: number
+  model: string
+  /** 요청 직전의 프로젝트. 응답 파일을 이 위에 합친다. */
+  base: { files: Record<string, string>; type: ProjectType }
+  buffer: string
+  thinking: string
+  sources: Map<string, WebSource>
+  outputFiles: string[]
+  edited: Set<string>
+  structuralChange: boolean
+  turnUsage: { usage: TokenUsage; cost: number } | null
+  contextTokens: number
+  lastPatch: string
+  lastPatchAt: number
+  pendingPatch: { files: Record<string, string>; projectType: ProjectType; fingerprint: string } | null
+  patchTimer: ReturnType<typeof setTimeout> | null
+  /** 생성 중에 대화를 지웠다. 끝나도 저장하지 않는다. */
+  discarded: boolean
+}
 
 // 이미지만 보내고 글을 비웠을 때 대신 보내는 요청
 const IMAGE_ONLY_PROMPT = '이 이미지를 설명해 주세요'
@@ -188,39 +231,90 @@ export default function App() {
   const projectFilesRef = useRef<Record<string, string>>({})
   const [projectType, setProjectType] = useState<'html' | 'react' | 'vue'>('html')
   const [githubRepo, setGithubRepo] = useState<GithubRepo | null>(null)
-  // 도구 실행(스트리밍 중)에서 최신 연결 저장소를 읽기 위해
-  const githubRepoRef = useRef<GithubRepo | null>(null)
-  useEffect(() => { githubRepoRef.current = githubRepo }, [githubRepo])
+  // 화면에 떠 있는 대화가 생성 중인지. 다른 대화의 생성은 runsRef 에 따로 있다.
   const [isLoading, setIsLoading] = useState(false)
+  // 진행 중인 생성(대화 id → Run)과, 화면에 떠 있는 대화 id(생성 코드가 최신 값을 바로 읽도록 ref)
+  const runsRef = useRef(new Map<string, Run>())
+  const fgChatIdRef = useRef<string | null>(null)
+  const isFg = (run: Run) => run.chatId === fgChatIdRef.current
+  // 사이드바 표시용: 생성 중인 대화, 뒤에서 끝났지만 아직 열어 보지 않은 대화
+  const [runningIds, setRunningIds] = useState<string[]>([])
+  const [unreadIds, setUnreadIds] = useState<string[]>([])
+  const syncRunning = () => setRunningIds([...runsRef.current.keys()])
+
+  // ── 답변 완료 알림 ──
+  // 다른 대화의 답변이 끝나면: 앱 안 알림(토스트) + 사이드바 점 + 탭 제목 개수. 화면을 보고 있지 않으면 시스템 알림(켠 경우)도 띄운다.
+  const [toasts, setToasts] = useState<{ id: number; chatId: string; title: string; failed: boolean }[]>([])
+  const toastSeqRef = useRef(0)
+  const dismissToast = (id: number) => setToasts((prev) => prev.filter((t) => t.id !== id))
+  const [notifyOn, setNotifyOn] = useState(notifyEnabled)
+  // 화면의 대화가 끝났는데 사용자가 다른 탭·창을 보고 있었다. 돌아오면 지운다.
+  const [attention, setAttention] = useState(false)
+  // 알림에서 대화를 열 때 최신 handleSelectChat 을 부르기 위한 ref
+  const selectChatRef = useRef<(id: string) => void>(() => {})
+  const announceDone = (run: Run) => {
+    const failed = !!run.messages[run.messages.length - 1]?.failed
+    const title = chatTitle(run.messages)
+    const away = document.visibilityState !== 'visible' || !document.hasFocus()
+    if (!isFg(run)) {
+      const id = ++toastSeqRef.current
+      setToasts((prev) => [...prev.filter((t) => t.chatId !== run.chatId), { id, chatId: run.chatId, title, failed }].slice(-3))
+      setTimeout(() => dismissToast(id), TOAST_MS)
+    } else if (away) {
+      setAttention(true)
+    } else {
+      return
+    }
+    showSystemNotification(run.chatId, failed ? '답변 생성 중 오류가 났어요' : '답변이 완료됐어요', title, (id) => selectChatRef.current(id))
+  }
+  useEffect(() => {
+    const n = unreadIds.length + (attention ? 1 : 0)
+    document.title = n ? `(${n}) ${BASE_TITLE}` : BASE_TITLE
+  }, [unreadIds.length, attention])
+  useEffect(() => {
+    const back = () => { if (document.visibilityState === 'visible') setAttention(false) }
+    document.addEventListener('visibilitychange', back)
+    window.addEventListener('focus', back)
+    const off = onNotificationOpen((id) => selectChatRef.current(id))
+    return () => { document.removeEventListener('visibilitychange', back); window.removeEventListener('focus', back); off() }
+  }, [])
+  const toggleNotify = async (on: boolean) => {
+    const ok = await setNotifyEnabled(on)
+    setNotifyOn(ok)
+    if (on && !ok) setStorageError('알림이 차단돼 있어요. 브라우저 주소창의 사이트 설정에서 알림을 허용한 뒤 다시 켜 주세요')
+  }
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null)
   const [lastCost, setLastCost] = useState(0)
   const [usageTotals, setUsageTotals] = useState(loadUsage)
   // 요청 1건이 끝날 때마다 호출된다. 화면의 '이번' 값을 바꾸고 오늘·누적 합계에 더한다.
   const [balance, setBalanceState] = useState<Balance | null>(() => loadBalance())
   const handleBalanceChange = (amount: number | null) => setBalanceState(setBalance(amount))
-  // 한 턴(질문 1개)이 도구 왕복으로 요청 여러 번이 될 수 있어, '이번' 표시는 턴 안에서 합산한다. 누적·잔액은 요청마다 더한다.
-  const turnUsageRef = useRef<{ usage: TokenUsage; cost: number } | null>(null)
   // 지금 대화가 차지한 컨텍스트(가장 최근 요청의 입력 전체 + 출력). 다음 턴에 이만큼이 다시 입력으로 간다.
   const [contextTokens, setContextTokens] = useState(0)
   const contextTokensRef = useRef(0)
-  const recordUsage = (usage: TokenUsage) => {
-    contextTokensRef.current = usage.promptTokens + usage.completionTokens
-    setContextTokens(contextTokensRef.current)
-    const cost = estimateCost(activeModel, usage)
-    const prev = turnUsageRef.current
+  // 한 턴(질문 1개)이 도구 왕복으로 요청 여러 번이 될 수 있어, '이번' 표시는 턴 안에서 합산한다. 누적·잔액은 요청마다 더한다.
+  const recordUsage = (run: Run, usage: TokenUsage) => {
+    run.contextTokens = usage.promptTokens + usage.completionTokens
+    const cost = estimateCost(run.model, usage)
+    const prev = run.turnUsage
     const sum: TokenUsage = prev ? {
       ...usage,
       promptTokens: prev.usage.promptTokens + usage.promptTokens,
       cacheWriteTokens: prev.usage.cacheWriteTokens + usage.cacheWriteTokens,
+      cacheWrite1hTokens: (prev.usage.cacheWrite1hTokens ?? 0) + (usage.cacheWrite1hTokens ?? 0),
       cacheReadTokens: prev.usage.cacheReadTokens + usage.cacheReadTokens,
       completionTokens: prev.usage.completionTokens + usage.completionTokens,
       totalTokens: prev.usage.totalTokens + usage.totalTokens,
     } : usage
-    turnUsageRef.current = { usage: sum, cost: (prev?.cost ?? 0) + cost }
-    setTokenUsage(sum)
-    setLastCost(turnUsageRef.current.cost)
-    setUsageTotals(addUsage(activeModel, usage))
+    run.turnUsage = { usage: sum, cost: (prev?.cost ?? 0) + cost }
+    // 오늘·누적 합계와 잔액은 어느 대화의 요청이든 더한다. '이번' 값과 컨텍스트 게이지는 화면의 대화일 때만 바꾼다.
+    setUsageTotals(addUsage(run.model, usage))
     setBalanceState(loadBalance())
+    if (!isFg(run)) return
+    contextTokensRef.current = run.contextTokens
+    setContextTokens(run.contextTokens)
+    setTokenUsage(sum)
+    setLastCost(run.turnUsage.cost)
   }
   // 대화에서 선택된 답변 위치와, 캔버스 탭 전환 요청
   const [answerIndex, setAnswerIndex] = useState<number | null>(null)
@@ -240,21 +334,6 @@ export default function App() {
     const saved = localStorage.getItem('vibe_model')
     return saved && MODELS.some((m) => m.id === saved) ? saved : MODELS[0].id
   })
-  const bufferRef = useRef('')
-  // 진행 중인 생성 요청. 중지 버튼이 abort() 한다.
-  const abortRef = useRef<AbortController | null>(null)
-  // 진행 중인 요청의 서버 생성 id. 중지 버튼이 서버 쪽 생성도 멈춘다.
-  const generationIdRef = useRef<string | null>(null)
-  // 진행 중인 요청 직전의 프로젝트. 응답 파일을 이 위에 합친다.
-  const baseProjectRef = useRef<{ files: Record<string, string>; type: ProjectType }>({ files: {}, type: 'html' })
-  const lastRealtimePatchRef = useRef('')
-  const lastRealtimePatchAtRef = useRef(0)
-  const realtimePatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pendingRealtimePatchRef = useRef<{
-    files: Record<string, string>
-    projectType: 'html' | 'react' | 'vue'
-    fingerprint: string
-  } | null>(null)
 
   // Resizable chat panel state
   // 드래그 가능한 패널 리사이저 상태
@@ -302,7 +381,8 @@ export default function App() {
 
   // 저장된 대화. chatId 가 null 이면 아직 저장 전인 새 대화다.
   const [chats, setChats] = useState<ChatSummary[]>([])
-  const [chatId, setChatId] = useState<string | null>(null)
+  const [chatId, setChatIdState] = useState<string | null>(null)
+  const setChatId = (id: string | null) => { fgChatIdRef.current = id; setChatIdState(id) }
   const chatCreatedAtRef = useRef(0)
   // 사용자가 보낸 요청이나 파일 수정으로 바뀐 내용이 있을 때만 저장한다. 대화를 불러온 직후에는 저장하지 않는다.
   const unsavedRef = useRef(false)
@@ -359,7 +439,7 @@ export default function App() {
       setStorageError('')
       setDriveModal(null)
       // 권한을 추가했으면 지금 프로젝트를 바로 드라이브 폴더에 저장한다.
-      const id = genChatIdRef.current ?? chatId
+      const id = fgChatIdRef.current
       if (wasScope && driveAutoSave && id && Object.keys(projectFilesRef.current).length) {
         exportProject(id, chatTitle(messages), projectFilesRef.current).then((r) => setDriveFolderUrl(r.url)).catch(() => {})
       }
@@ -407,24 +487,52 @@ export default function App() {
     else localStorage.removeItem('vibe_chat_id')
   }, [chatId])
 
-  // 대화를 지금 상태의 프로젝트와 함께 저장하고 목록 맨 위로 올린다. 실패하면 reject 한다.
-  const storeChat = async (id: string, msgs: Message[]) => {
-    const chat = {
-      id,
-      title: chatTitle(msgs),
-      createdAt: chatCreatedAtRef.current,
-      updatedAt: Date.now(),
-      messages: msgs,
-      projectFiles,
-      projectType,
-      githubRepo,
-      projectId: chatProjectIdRef.current,
-    }
+  // 같은 대화의 저장이 겹치면(시작 시 저장 ↔ 끝난 뒤 저장) 드라이브에 파일이 둘 생기거나 옛 내용이 나중에 덮어쓸 수 있어, 대화별로 한 줄로 세운다.
+  const saveQueueRef = useRef(new Map<string, Promise<unknown>>())
+  const persistChat = (chat: StoredChat): Promise<void> => {
     chatCacheRef.current.set(chat.id, chat)
-    const where = await saveChat(activeApiKey, chat)
-    // 연결된 상태인데 브라우저에 저장됐다 = 드라이브 저장이 실패해 대기 저장으로 돌린 것
-    setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
-    setChats((prev) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, projectId: chat.projectId, ...(where === 'local' ? { pending: true } : {}) }, ...prev.filter((c) => c.id !== chat.id)])
+    const prev = saveQueueRef.current.get(chat.id) ?? Promise.resolve()
+    const job = prev.catch(() => {}).then(async () => {
+      const where = await saveChat(activeApiKey, chat)
+      // 연결된 상태인데 브라우저에 저장됐다 = 드라이브 저장이 실패해 대기 저장으로 돌린 것
+      setStorageError(where === 'local' && isDriveConnected() ? '드라이브 저장에 실패해 이 브라우저에 임시 저장했어요. 새로고침하면 다시 올립니다' : '')
+      setChats((prevChats) => [{ id: chat.id, title: chat.title, updatedAt: chat.updatedAt, projectId: chat.projectId, ...(where === 'local' ? { pending: true } : {}) }, ...prevChats.filter((c) => c.id !== chat.id)])
+    })
+    saveQueueRef.current.set(chat.id, job)
+    job.catch(() => {}).finally(() => { if (saveQueueRef.current.get(chat.id) === job) saveQueueRef.current.delete(chat.id) })
+    return job
+  }
+  // 화면의 대화를 지금 상태의 프로젝트와 함께 저장하고 목록 맨 위로 올린다. 실패하면 reject 한다.
+  const storeChat = (id: string, msgs: Message[]) => persistChat({
+    id,
+    title: chatTitle(msgs),
+    createdAt: chatCreatedAtRef.current,
+    updatedAt: Date.now(),
+    messages: msgs,
+    projectFiles,
+    projectType,
+    githubRepo,
+    projectId: chatProjectIdRef.current,
+  })
+  // 뒤에서 끝난 생성의 결과를 저장한다(화면 상태가 아니라 Run 이 가진 내용으로).
+  const saveRun = (run: Run) => persistChat({
+    id: run.chatId,
+    title: chatTitle(run.messages),
+    createdAt: run.createdAt,
+    updatedAt: Date.now(),
+    messages: run.messages,
+    projectFiles: run.files,
+    projectType: run.type,
+    githubRepo: run.githubRepo,
+    projectId: run.projectId,
+  })
+  // 화면의 대화를 떠나기 직전: 저장 대기(0.5초) 중인 변경이 있으면 지금 저장한다. 생성 중인 대화는 Run 이 끝날 때 저장한다.
+  const leaveForeground = () => {
+    interruptRef.current = null
+    const id = fgChatIdRef.current
+    if (!id || runsRef.current.has(id) || !unsavedRef.current || messages.length === 0) return
+    unsavedRef.current = false
+    storeChat(id, messages).catch(storageFailMessage('대화를 저장하지 못했습니다 (저장소에 연결할 수 없음)'))
   }
 
   // ── 프로젝트 ───────────────────────────────────────────────
@@ -454,7 +562,7 @@ export default function App() {
   }
   /** 프로젝트 안에서 새 대화 */
   const handleNewChatInProject = (pid: string) => {
-    if (isLoading) return
+    leaveForeground()
     resetConversation()
     setChatId(null)
     setChatProjectId(pid)
@@ -467,6 +575,9 @@ export default function App() {
       const chat = id === chatId
         ? null
         : chatCacheRef.current.get(id) ?? await loadChat(activeApiKey, id)
+      // 생성 중인 대화면 끝날 때 저장되는 내용에도 반영한다.
+      const running = runsRef.current.get(id)
+      if (running) running.projectId = pid
       if (id === chatId) {
         setChatProjectId(pid)
         bindChatProject(id, projects.find((p) => p.id === pid))
@@ -510,11 +621,11 @@ export default function App() {
 
   // 생성 중 응답은 이 페이지가 직접 받고 있어서 새로고침·탭 닫기 시 끊기고 저장되지 않는다. 떠나기 전에 브라우저 확인창을 띄운다.
   useEffect(() => {
-    if (!isLoading) return
+    if (!runningIds.length) return
     const warn = (e: BeforeUnloadEvent) => e.preventDefault()
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
-  }, [isLoading])
+  }, [runningIds.length])
 
   /**
    * 드래그 시작 핸들러
@@ -559,36 +670,36 @@ export default function App() {
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
   }, [])
-  const applyRealtimePatch = useCallback((
-    files: Record<string, string>,
-    pType: 'html' | 'react' | 'vue',
-    fingerprint: string,
-  ) => {
-    lastRealtimePatchRef.current = fingerprint
-    lastRealtimePatchAtRef.current = Date.now()
-    const merged = mergeFiles(baseProjectRef.current, files, pType)
-    projectFilesRef.current = merged
-    setProjectFiles(merged)
-    setProjectType(pType)
+  // 생성 중인 대화의 메시지·파일을 바꾼다. 화면에 떠 있는 대화일 때만 화면에도 반영한다.
+  const runSetMessages = (run: Run, next: Message[] | ((prev: Message[]) => Message[])) => {
+    run.messages = typeof next === 'function' ? next(run.messages) : next
+    if (isFg(run)) setMessages(run.messages)
+  }
+  const runSetFiles = (run: Run, files: Record<string, string>, type?: ProjectType) => {
+    run.files = files
+    if (type) run.type = type
+    if (!isFg(run)) return
+    projectFilesRef.current = files
+    setProjectFiles(files)
+    if (type) setProjectType(type)
+  }
+  const clearPatchTimer = (run: Run) => {
+    run.pendingPatch = null
+    if (run.patchTimer) { clearTimeout(run.patchTimer); run.patchTimer = null }
+  }
+  const applyRealtimePatch = (run: Run, files: Record<string, string>, pType: ProjectType, fingerprint: string) => {
+    run.lastPatch = fingerprint
+    run.lastPatchAt = Date.now()
+    runSetFiles(run, mergeFiles(run.base, files, pType), pType)
     // 이번 답변이 실제로 파일을 만들거나 고칠 때만 닫아 둔 미리보기를 연다.
-    setCanvasClosed(false)
-  }, [])
-
-  const flushPendingRealtimePatch = useCallback(() => {
-    const pending = pendingRealtimePatchRef.current
+    if (isFg(run)) setCanvasClosed(false)
+  }
+  const flushPendingRealtimePatch = (run: Run) => {
+    const pending = run.pendingPatch
     if (!pending) return
-    pendingRealtimePatchRef.current = null
-    applyRealtimePatch(pending.files, pending.projectType, pending.fingerprint)
-  }, [applyRealtimePatch])
-
-  useEffect(() => {
-    return () => {
-      if (realtimePatchTimerRef.current) {
-        clearTimeout(realtimePatchTimerRef.current)
-        realtimePatchTimerRef.current = null
-      }
-    }
-  }, [])
+    run.pendingPatch = null
+    applyRealtimePatch(run, pending.files, pending.projectType, pending.fingerprint)
+  }
   const handleApiKeyChange = (key: string) => {
     setActiveApiKey(key)
     localStorage.setItem('vibe_api_key_anthropic', key)
@@ -610,25 +721,18 @@ export default function App() {
     try { localStorage.setItem('vibe_model_options', JSON.stringify(all)) } catch { /* 이번 세션만 유지 */ }
   }
   // 웹 검색 출처(url 기준, 인용된 것 우선)
-  const sourcesRef = useRef(new Map<string, WebSource>())
-  const handleSource = (src: WebSource) => {
-    const prev = sourcesRef.current.get(src.url)
-    if (!prev || (src.cited && !prev.cited)) sourcesRef.current.set(src.url, src)
+  const handleSource = (run: Run, src: WebSource) => {
+    const prev = run.sources.get(src.url)
+    if (!prev || (src.cited && !prev.cited)) run.sources.set(src.url, src)
   }
   // 도구 진행 상황(검색어·읽는 URL·실행 명령·파일 수정 등)을 생각 요약 칸에 한 줄씩 붙인다.
-  const handleActivity = (line: string) => handleThinking(`${thinkingRef.current && !thinkingRef.current.endsWith('\n') ? '\n' : ''}${line}\n`)
-  // 코드 실행이 만든 파일(Files API id)
-  const outputFilesRef = useRef<string[]>([])
-  // 텍스트 에디터로 이번 턴에 바뀐 파일
-  const editedRef = useRef(new Set<string>())
-  // 이번 답변에서 파일을 지우거나 이름을 바꿨는지(되돌리기 지점으로 남긴다)
-  const structuralChangeRef = useRef(false)
+  const handleActivity = (run: Run, line: string) => handleThinking(run, `${run.thinking && !run.thinking.endsWith('\n') ? '\n' : ''}${line}\n`)
   // Claude 의 GitHub 커밋·푸시 도구. 캔버스 GitHub 버튼에서 저장한 토큰과 연결 저장소를 쓴다. 푸시 전에 사용자 확인을 받는다.
-  const runGithubTool = async (input: Record<string, unknown>): Promise<ClientToolResult> => {
+  const runGithubTool = async (run: Run, input: Record<string, unknown>): Promise<ClientToolResult> => {
     let token = ''
     try { token = localStorage.getItem('vibe_gh_token') ?? '' } catch { /* 없음 */ }
-    const repo = githubRepoRef.current
-    const files = projectFilesRef.current
+    const repo = run.githubRepo
+    const files = run.files
     const fileCount = Object.keys(files).length
     if (input.command === 'status') {
       return { content: `GitHub token: ${token ? 'saved' : 'missing (user must add it once in the top-right \"API 키\" settings, GitHub 토큰 field)'}; repository: ${repo ? `${repo.owner}/${repo.repo} (branch ${repo.branch})` : 'none connected'}; project files: ${fileCount}` }
@@ -640,30 +744,30 @@ export default function App() {
     if (!repo && !newName) return { content: 'No repository is connected. Ask the user for a repository name, then call commit_push with repo_name.', isError: true }
     const makePublic = input.public === true
     const target = repo ? `${repo.owner}/${repo.repo} (${repo.branch} 브랜치)` : `새 ${makePublic ? '공개' : '비공개'} 저장소 '${newName}'`
-    if (!window.confirm(`GitHub ${target}에 파일 ${fileCount}개를 커밋·푸시할까요?`)) {
+    // 다른 대화를 보고 있을 때도 뜰 수 있어 어느 대화의 요청인지 함께 알려 준다.
+    if (!window.confirm(`${isFg(run) ? '' : `'${chatTitle(run.messages)}' 대화에서 요청했어요.\n`}GitHub ${target}에 파일 ${fileCount}개를 커밋·푸시할까요?`)) {
       return { content: 'The user declined the push. Nothing was uploaded.' }
     }
     try {
       const res = repo
         ? await updateRepoWithFiles(token, repo.owner, repo.repo, repo.branch, files)
         : await createRepoWithFiles(token, newName, files, !makePublic)
-      handleGithubRepoChange({ owner: res.owner, repo: res.repo, branch: res.branch })
+      run.githubRepo = { owner: res.owner, repo: res.repo, branch: res.branch }
+      if (isFg(run)) setGithubRepo(run.githubRepo)
       return { content: `Pushed ${fileCount} files to ${res.owner}/${res.repo} (${res.branch}): ${res.url}` }
     } catch (e) {
       return { content: `GitHub push failed: ${e instanceof Error ? e.message : String(e)}`, isError: true }
     }
   }
 
-  const runProjectFiles = (input: Record<string, unknown>): ClientToolResult => {
-    const files = projectFilesRef.current
+  const runProjectFiles = (run: Run, input: Record<string, unknown>): ClientToolResult => {
+    const files = run.files
     const path = String(input.path ?? '').replace(/^\/+/, '')
     const command = String(input.command ?? '')
     const apply = (next: Record<string, string>) => {
-      baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
-      projectFilesRef.current = next
-      setProjectFiles(next)
-      structuralChangeRef.current = true
-      unsavedRef.current = true
+      run.base = { files: next, type: run.base.type }
+      runSetFiles(run, next)
+      run.structuralChange = true
     }
     if (command === 'list') {
       const names = Object.keys(files)
@@ -704,22 +808,23 @@ export default function App() {
     return pickDriveFile()
   }
   /** 대화에 첨부된 문서 중 이름이 맞는 것(가장 최근) */
-  const findDoc = (name: string): MessageDoc | undefined =>
-    [...messages].reverse().flatMap((m) => m.docs ?? []).find((d) => d.name === name || d.name.startsWith(name))
+  const findDoc = (msgs: Message[], name: string): MessageDoc | undefined =>
+    [...msgs].reverse().flatMap((m) => m.docs ?? []).find((d) => d.name === name || d.name.startsWith(name))
 
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
-  const runClientTool = async (name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
+  const runClientTool = async (run: Run, name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
+    const messages = run.messages
     if (name === 'memory') return runMemoryCommand(input)
     if (name === 'app_status') {
       const on = (Object.entries({ 'web search': modelOptions.webSearch, 'web fetch': modelOptions.webFetch, 'partial edit (text editor)': modelOptions.textEditor, memory: modelOptions.memory, 'code execution': modelOptions.codeExecution }) as [string, boolean][])
         .filter(([, v]) => v).map(([k]) => k)
-      return { content: `${await storageStatusLine()} Model: ${activeModel}. Tools on: ${on.join(', ') || 'none'}${modelOptions.advisorModel ? `, advisor (${modelOptions.advisorModel})` : ''}.` }
+      return { content: `${await storageStatusLine()} Model: ${run.model}. Tools on: ${on.join(', ') || 'none'}${modelOptions.advisorModel ? `, advisor (${modelOptions.advisorModel})` : ''}.` }
     }
     if (name === 'drive_files') {
       if (!isDriveConnected()) { setDriveModal('request'); return { content: 'Google Drive is not connected. A connect popup is now shown; ask the user to connect and then try again.', isError: true } }
       if (!hasFileScope()) { setDriveModal('scope'); return { content: 'Saving visible files needs one more Google permission. A popup asking the user to allow it is now shown; ask them to press it, then try again.', isError: true } }
-      const id = genChatIdRef.current ?? chatId
-      if (!id) return { content: 'No chat yet.', isError: true }
+      const id = run.chatId
+      const showFolder = (url: string) => { if (isFg(run)) setDriveFolderUrl(url) }
       const title = chatTitle(messages.length ? messages : [{ role: 'user', content: '새 프로젝트' }])
       const cmd = String(input.command ?? '')
       if (cmd === 'list') {
@@ -742,40 +847,38 @@ export default function App() {
         return { content: `Picked "${picked.name}". PDFs, images and large files must be attached with the Drive button in the message box so they are sent with the message; ask the user to attach it there.` }
       }
       if (cmd === 'read_attachment') {
-        const d = findDoc(String(input.path ?? input.name ?? ''))
+        const d = findDoc(messages, String(input.path ?? input.name ?? ''))
         if (!d) return { content: 'No attachment with that name in this chat.', isError: true }
         return { content: await readAttachmentText(d) }
       }
       if (cmd === 'copy_to_project') {
         // A안: 첨부한 드라이브 파일을 프로젝트 폴더 imports/ 로 복사하고(원본은 그대로) 텍스트면 프로젝트 파일에 넣어 고칠 수 있게 한다.
-        const d = findDoc(String(input.path ?? input.name ?? ''))
+        const d = findDoc(messages, String(input.path ?? input.name ?? ''))
         if (!d?.driveId) return { content: 'No Drive attachment with that name in this chat.', isError: true }
         const r = await importPicked(id, title, { id: d.driveId, name: d.name, mimeType: d.mimeType })
         if (r.text !== undefined) {
-          const next = { ...projectFilesRef.current, [r.path]: r.text }
-          baseProjectRef.current = { files: next, type: baseProjectRef.current.type }
-          projectFilesRef.current = next
-          setProjectFiles(next)
-          setCanvasClosed(false)
-          unsavedRef.current = true
+          const next = { ...run.files, [r.path]: r.text }
+          run.base = { files: next, type: run.base.type }
+          runSetFiles(run, next)
+          if (isFg(run)) setCanvasClosed(false)
           return { content: `Copied "${d.name}" into the project folder as ${r.path}; it is now a project file you can edit (the original is untouched).` }
         }
         return { content: `Copied "${d.name}" into the project folder as ${r.path} (binary, so it is not editable as text).` }
       }
       if (cmd === 'save_project') {
-        const r = await exportProject(id, title, projectFilesRef.current)
-        setDriveFolderUrl(r.url)
+        const r = await exportProject(id, title, run.files)
+        showFolder(r.url)
         return { content: `Saved project files to ${r.url} (${r.uploaded} file(s) updated, unchanged ones skipped).` }
       }
       if (cmd === 'save_text') {
         const path = String(input.path ?? '').trim()
         if (!path) return { content: 'path is required', isError: true }
         const url = await saveToProject(id, title, path, String(input.content ?? ''))
-        setDriveFolderUrl(url)
+        showFolder(url)
         return { content: `Saved ${path} to ${url}` }
       }
       if (cmd === 'save_outputs') {
-        const ids = [...new Set([...messages.flatMap((m) => m.outputs ?? []), ...outputFilesRef.current])]
+        const ids = [...new Set([...messages.flatMap((m) => m.outputs ?? []), ...run.outputFiles])]
         if (!ids.length) return { content: 'There are no code execution output files in this chat.' }
         const saved: string[] = []
         let url = ''
@@ -784,7 +887,7 @@ export default function App() {
           url = await saveToProject(id, title, `outputs/${fname}`, blob)
           saved.push(fname)
         }
-        setDriveFolderUrl(url)
+        showFolder(url)
         return { content: `Saved ${saved.join(', ')} to ${url} (outputs/).` }
       }
       return { content: `Unknown command ${cmd}`, isError: true }
@@ -795,29 +898,26 @@ export default function App() {
       setDriveModal('request')
       return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
     }
-    if (name === 'project_files') return runProjectFiles(input)
-    if (name === 'github') return runGithubTool(input)
+    if (name === 'project_files') return runProjectFiles(run, input)
+    if (name === 'github') return runGithubTool(run, input)
     if (name === 'str_replace_based_edit_tool') {
-      const base = baseProjectRef.current
-      const { result, next, changed } = runEditorCommand(projectFilesRef.current, input)
+      const { result, next, changed } = runEditorCommand(run.files, input)
       if (next && changed) {
         // 이후 스트리밍 파일 반영(mergeFiles)도 이 수정본 위에 쌓이도록 기준 프로젝트를 함께 갱신한다.
-        baseProjectRef.current = { files: next, type: base.type }
-        projectFilesRef.current = next
-        setProjectFiles(next)
-        setCanvasClosed(false)
-        editedRef.current.add(changed)
+        run.base = { files: next, type: run.base.type }
+        runSetFiles(run, next)
+        if (isFg(run)) setCanvasClosed(false)
+        run.edited.add(changed)
       }
       return result
     }
     return { content: `Error: unknown tool ${name}`, isError: true }
   }
   // 생각 요약을 받으면 본문이 나오기 전의 빈 답변 자리에 붙인다.
-  const thinkingRef = useRef('')
-  const handleThinking = (text: string) => {
-    thinkingRef.current += text
-    const thinking = thinkingRef.current
-    setMessages((prev) => {
+  const handleThinking = (run: Run, text: string) => {
+    run.thinking += text
+    const thinking = run.thinking
+    runSetMessages(run, (prev) => {
       const last = prev[prev.length - 1]
       if (last?.role !== 'assistant') return prev
       const updated = [...prev]
@@ -843,9 +943,6 @@ export default function App() {
    * 8. 에러 처리
    *    - 에러 메시지를 채팅에 표시 (429·5xx 는 시작을 2회 다시 시도한 뒤 도달)
    */
-  // 지금 생성 중인 대화 id(부분 백업용). 새 대화의 첫 요청에서는 chatId 상태가 아직 갱신 전이라 따로 둔다.
-  const genChatIdRef = useRef<string | null>(null)
-
   // 끼어들어 말하기: 생성 중에 보내면 지금 답변을 멈추고(받은 부분은 남김) 멈춤 처리가 끝난 뒤 새 메시지를 보낸다.
   const interruptRef = useRef<{ prompt: string; images: MessageImage[] } | null>(null)
   const handleInterrupt = (prompt: string, images: MessageImage[] = []) => {
@@ -856,6 +953,7 @@ export default function App() {
       : { prompt, images }
     if (!prev) handleStop()
   }
+  // 대화를 바꾸면 leaveForeground 가 대기 중인 끼어들기를 비운다(다른 대화로 보내지지 않게).
   useEffect(() => {
     if (isLoading || !interruptRef.current) return
     const next = interruptRef.current
@@ -891,7 +989,6 @@ export default function App() {
     const generationId = crypto.randomUUID()
     // 새 대화의 첫 요청이면 이때 저장용 id 를 만든다.
     const id = chatId ?? crypto.randomUUID()
-    genChatIdRef.current = id
     if (!chatId) {
       setChatId(id)
       chatCreatedAtRef.current = Date.now()
@@ -899,120 +996,124 @@ export default function App() {
     // 브라우저를 닫아도 다시 열었을 때 이어 받도록 생성 id 를 담은 채로 바로 저장한다. 응답이 끝나면 저장 effect 가 결과로 덮어쓴다.
     storeChat(id, [...history, { role: 'assistant', content: '', files: {}, generationId }])
       .catch(storageFailMessage('대화를 저장하지 못했습니다 (저장소에 연결할 수 없음)'))
-    await runGeneration(history, generationId, { files: projectFilesRef.current, type: projectType }, false)
+    await runGeneration({
+      chatId: id, history, generationId, resume: false,
+      base: { files: projectFilesRef.current, type: projectType },
+      githubRepo, projectId: chatProjectIdRef.current, createdAt: chatCreatedAtRef.current,
+    })
   }
 
   /**
    * 생성 응답을 받아 대화와 프로젝트에 반영한다. resume 이면 새로 요청하지 않고 서버에 남은 생성을 처음부터 받는다.
    * base 는 요청 직전의 프로젝트다. 응답 파일을 이 위에 합치고, 중지·오류 시 이 상태로 되돌린다.
    */
-  const runGeneration = async (history: Message[], generationId: string, base: { files: Record<string, string>; type: ProjectType }, resume: boolean) => {
-    setMessages(history)
-    setIsLoading(true)
-    bufferRef.current = ''
-    thinkingRef.current = ''
-    sourcesRef.current = new Map()
-    turnUsageRef.current = null
-    outputFilesRef.current = []
-    editedRef.current = new Set()
-    structuralChangeRef.current = false
-    lastRealtimePatchRef.current = ''
-    lastRealtimePatchAtRef.current = 0
-    pendingRealtimePatchRef.current = null
-    if (realtimePatchTimerRef.current) {
-      clearTimeout(realtimePatchTimerRef.current)
-      realtimePatchTimerRef.current = null
-    }
+  const runGeneration = async (init: {
+    chatId: string; history: Message[]; generationId: string; resume: boolean
+    base: { files: Record<string, string>; type: ProjectType }
+    githubRepo: GithubRepo | null; projectId: string | null; createdAt: number
+  }) => {
+    const { history, generationId, base, resume } = init
     // 중계 서버를 쓰면 생성 중인 답변에 생성 번호를 남긴다. 앱이 꺼졌다가 다시 열리면 이 번호로 서버에서 이어받는다.
     const genMark = USE_GENERATION_SERVER ? { generationId } : {}
     const placeholder: Message = { role: 'assistant', content: '', files: {}, ...genMark }
-    setMessages([...history, placeholder])
-    unsavedRef.current = true
+    const controller = new AbortController()
+    const run: Run = {
+      chatId: init.chatId, generationId, controller, history,
+      messages: [...history, placeholder],
+      files: base.files, type: base.type,
+      githubRepo: init.githubRepo, projectId: init.projectId, createdAt: init.createdAt || Date.now(),
+      model: activeModel, base,
+      buffer: '', thinking: '', sources: new Map(), outputFiles: [], edited: new Set(), structuralChange: false,
+      turnUsage: null, contextTokens: 0,
+      lastPatch: '', lastPatchAt: 0, pendingPatch: null, patchTimer: null,
+      discarded: false,
+    }
+    runsRef.current.set(run.chatId, run)
+    syncRunning()
+    if (isFg(run)) {
+      setMessages(run.messages)
+      setIsLoading(true)
+      unsavedRef.current = true
+    }
     // 중지하면 스트리밍 중 반영된 일부 파일 대신 이 상태로 되돌린다.
     const prevFiles = base.files
     const prevType = base.type
-    baseProjectRef.current = base
     // 받은 부분을 몇 초마다 백업한다. 복구되면 '끊긴 답변'(다시 시도 버튼)으로 보이고, 코드는 요청 전 상태로 둔다.
-    const backupId = genChatIdRef.current ?? chatId
     let lastBackupAt = Date.now()
     const backupPartial = () => {
-      if (!backupId) return
-      const { explanation } = parseVibe(bufferRef.current)
-      const partial = explanation || (bufferRef.current.includes('<VIBE_') ? '' : bufferRef.current.trim())
+      const { explanation } = parseVibe(run.buffer)
+      const partial = explanation || (run.buffer.includes('<VIBE_') ? '' : run.buffer.trim())
       backupChat({
-        id: backupId, title: chatTitle(history), createdAt: chatCreatedAtRef.current || Date.now(), updatedAt: Date.now(),
+        id: run.chatId, title: chatTitle(history), createdAt: run.createdAt, updatedAt: Date.now(),
         messages: [...history, USE_GENERATION_SERVER
           // 서버가 계속 받고 있으므로 끊긴 답변이 아니라 '생성 중'으로 남긴다(다시 열면 이어받기).
           ? { role: 'assistant', content: partial, files: {}, generationId }
           : { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(응답 도중 브라우저가 닫혀 여기까지 저장됐습니다. 다시 시도를 눌러 주세요)`, files: {}, failed: true }],
-        projectFiles: prevFiles, projectType: prevType, githubRepo, projectId: chatProjectIdRef.current,
+        projectFiles: prevFiles, projectType: prevType, githubRepo: run.githubRepo, projectId: run.projectId,
       })
     }
-    const controller = new AbortController()
-    abortRef.current = controller
-    generationIdRef.current = generationId
     // 응답이 끝난 이유(onUsage 로 마지막에 한 번 온다). 잘린 응답이면 형식 보정 대신 '이어서 생성'을 안내한다.
     let stopReason: string | undefined
-    const onUsage = (usage: TokenUsage) => { stopReason = usage.stopReason; recordUsage(usage) }
+    const onUsage = (usage: TokenUsage) => { stopReason = usage.stopReason; recordUsage(run, usage) }
     let panelFocused = false
     // 생성 중 화면이 저절로 꺼져 연결이 끊기지 않게 한다. 미지원 브라우저·거부 시에는 없이 진행한다.
     const wakeLock = await navigator.wakeLock?.request('screen').catch(() => null)
     try {
       const chunks = resume
         ? resumeCode(activeApiKey, generationId, onUsage, controller.signal)
-        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, handleThinking, {
-            onActivity: handleActivity,
-            onSource: handleSource,
-            onFile: (id) => { if (!outputFilesRef.current.includes(id)) outputFilesRef.current.push(id) },
-            onClientTool: runClientTool,
+        : streamCode(activeApiKey, activeModel, history, Object.keys(prevFiles).length ? prevFiles : undefined, onUsage, controller.signal, generationId, modelOptions, (t) => handleThinking(run, t), {
+            onActivity: (line) => handleActivity(run, line),
+            onSource: (src) => handleSource(run, src),
+            onFile: (id) => { if (!run.outputFiles.includes(id)) run.outputFiles.push(id) },
+            onClientTool: (name, input) => runClientTool(run, name, input),
             appTools: APP_TOOLS,
-            projectContext: projectContext(projects.find((p) => p.id === chatProjectIdRef.current)),
+            projectContext: projectContext(projects.find((p) => p.id === run.projectId)),
             codeMode,
             // 코드를 만들거나 고치라는 메시지일 때만 파일 전체를 보내고, 일반 대화에는 목록만 보낸다.
             filesMode: isBuildRequest(history[history.length - 1]?.content ?? '') ? 'full' : 'list',
           })
       for await (const chunk of chunks) {
-        bufferRef.current += chunk
+        run.buffer += chunk
         // 응답이 시작되면 진행 중인 답변을 현재 답변으로 표시한다. 본문은 대화에 바로 나온다.
-        if (!panelFocused && bufferRef.current.trim()) {
+        if (!panelFocused && run.buffer.trim() && isFg(run)) {
           panelFocused = true
           setAnswerIndex(history.length)
         }
-        const parsedChunk = parseVibe(bufferRef.current)
+        const parsedChunk = parseVibe(run.buffer)
         const { explanation } = parsedChunk
 
         // Real-time patch: update code preview while streaming
         if (Object.keys(parsedChunk.files).length > 0) {
           const nextFingerprint = fingerprintFiles(parsedChunk.files)
-          if (nextFingerprint !== lastRealtimePatchRef.current) {
-            const elapsed = Date.now() - lastRealtimePatchAtRef.current
+          if (nextFingerprint !== run.lastPatch) {
+            const elapsed = Date.now() - run.lastPatchAt
             if (elapsed >= REALTIME_PATCH_THROTTLE_MS) {
-              applyRealtimePatch(parsedChunk.files, parsedChunk.projectType, nextFingerprint)
+              applyRealtimePatch(run, parsedChunk.files, parsedChunk.projectType, nextFingerprint)
             } else {
-              pendingRealtimePatchRef.current = {
+              run.pendingPatch = {
                 files: parsedChunk.files,
                 projectType: parsedChunk.projectType,
                 fingerprint: nextFingerprint,
               }
-              if (!realtimePatchTimerRef.current) {
+              if (!run.patchTimer) {
                 const wait = Math.max(0, REALTIME_PATCH_THROTTLE_MS - elapsed)
-                realtimePatchTimerRef.current = setTimeout(() => {
-                  realtimePatchTimerRef.current = null
-                  flushPendingRealtimePatch()
+                run.patchTimer = setTimeout(() => {
+                  run.patchTimer = null
+                  flushPendingRealtimePatch(run)
                 }, wait)
               }
             }
           }
         }
 
-        setMessages((prev) => {
+        runSetMessages(run, (prev) => {
           const updated = [...prev]
           // VIBE 태그가 없으면 일반 대화 답변이므로 받은 텍스트를 그대로 보여준다.
           updated[updated.length - 1] = {
             role: 'assistant',
-            content: explanation || (hideConfirmTag(bufferRef.current).includes('<VIBE_') ? '생성 중...' : hideConfirmTag(bufferRef.current)),
+            content: explanation || (hideConfirmTag(run.buffer).includes('<VIBE_') ? '생성 중...' : hideConfirmTag(run.buffer)),
             files: {},
-            ...(thinkingRef.current ? { thinking: thinkingRef.current } : {}),
+            ...(run.thinking ? { thinking: run.thinking } : {}),
             ...genMark,
           }
           return updated
@@ -1020,9 +1121,9 @@ export default function App() {
         if (Date.now() - lastBackupAt >= PARTIAL_BACKUP_MS) { lastBackupAt = Date.now(); backupPartial() }
       }
 
-      flushPendingRealtimePatch()
+      flushPendingRealtimePatch(run)
 
-      let parsed = parseVibe(bufferRef.current)
+      let parsed = parseVibe(run.buffer)
       // max_tokens: 출력 한도에 걸려 잘림 → 이어서 생성 가능. model_context_window_exceeded: 컨텍스트가 가득 참 → 이어서 생성 불가.
       const truncated: Message['truncated'] = stopReason === 'max_tokens' ? 'output'
         : stopReason === 'model_context_window_exceeded' ? 'context' : undefined
@@ -1030,18 +1131,18 @@ export default function App() {
         // Auto-repair response format if model didn't generate valid code structure
       // 코드를 만들려다(<VIBE_FILE> 존재) 구조가 깨진 경우에만 보정한다. 태그가 없으면 일반 대화 답변이다.
       // 잘린 응답은 보정해도 같은 한도에 또 걸리므로 보정하지 않는다(원문 전체를 다시 보내 비용만 두 배가 된다).
-      if (!truncated && bufferRef.current.includes('<VIBE_FILE') && !isValidGeneratedProject(mergeFiles(baseProjectRef.current, parsed.files, parsed.projectType), parsed.projectType)) {
+      if (!truncated && run.buffer.includes('<VIBE_FILE') && !isValidGeneratedProject(mergeFiles(run.base, parsed.files, parsed.projectType), parsed.projectType)) {
         const repairPrompt = [
           '아래 원문 응답은 형식이 깨졌거나 코드가 부족합니다.',
           '반드시 <VIBE_FILE>, <VIBE_TYPE>, <VIBE_EXPLANATION> 형식으로만 다시 출력하세요.',
           '실제 실행 가능한 완성 코드(디자인+기능 포함)로 생성하고 설명문만 보내지 마세요.',
           '',
           '[원문 응답 시작]',
-          bufferRef.current,
+          run.buffer,
           '[원문 응답 끝]',
         ].join('\n')
 
-        setMessages((prev) => {
+        runSetMessages(run, (prev) => {
           const updated = [...prev]
           updated[updated.length - 1] = {
             role: 'assistant',
@@ -1053,14 +1154,14 @@ export default function App() {
 
         // 보정 요청은 이어 받기 대상이 아니라 대화에 id 를 남기지 않는다. 중지 버튼은 이 id 로 서버 생성을 멈춘다.
         const repairId = crypto.randomUUID()
-        generationIdRef.current = repairId
+        run.generationId = repairId
         let repairedRaw = ''
         for await (const chunk of streamCode(
           activeApiKey,
           activeModel,
           [{ role: 'user', content: repairPrompt }],
           Object.keys(prevFiles).length ? prevFiles : undefined,
-          recordUsage,
+          (usage) => recordUsage(run, usage),
           controller.signal,
           repairId,
           modelOptions,
@@ -1069,22 +1170,19 @@ export default function App() {
         }
 
         const repaired = parseVibe(repairedRaw)
-        if (isValidGeneratedProject(mergeFiles(baseProjectRef.current, repaired.files, repaired.projectType), repaired.projectType)) {
+        if (isValidGeneratedProject(mergeFiles(run.base, repaired.files, repaired.projectType), repaired.projectType)) {
           parsed = repaired
-          bufferRef.current = repairedRaw
+          run.buffer = repairedRaw
         }
       }
 
       const { explanation } = parsed
       // 텍스트 에디터로 고친 파일도 이번 답변의 결과물로 친다(되돌리기 지점·'파일 N개' 표시).
-      const files = { ...Object.fromEntries([...editedRef.current].map((n) => [n, baseProjectRef.current.files[n] ?? ''])), ...parsed.files }
+      const files = { ...Object.fromEntries([...run.edited].map((n) => [n, run.base.files[n] ?? ''])), ...parsed.files }
       // 끝까지 받은(닫는 태그가 있는) 파일만 parseVibe 가 돌려주므로 잘린 응답이어도 완성된 파일은 반영한다.
-      const pType = mergedType(baseProjectRef.current, files, parsed.projectType)
+      const pType = mergedType(run.base, files, parsed.projectType)
       if (Object.keys(files).length > 0) {
-        const merged = mergeFiles(baseProjectRef.current, files, parsed.projectType)
-        projectFilesRef.current = merged
-        setProjectFiles(merged)
-        setProjectType(pType)
+        runSetFiles(run, mergeFiles(run.base, files, parsed.projectType), pType)
       }
       const doneNames = Object.keys(files)
       const truncatedNote = truncated === 'output'
@@ -1095,16 +1193,16 @@ export default function App() {
           ? '⚠️ 대화가 모델의 컨텍스트 한도를 가득 채워 응답이 잘렸습니다. 새 대화에서 이어 가세요.'
           : ''
       // 수동 모드에서 모델이 '코딩 진행' 확인을 요청했는지(파일을 만들지 않은 답변에서만)
-      const askConfirm = bufferRef.current.includes('<VIBE_CONFIRM') && !bufferRef.current.includes('<VIBE_FILE')
-      const plain = hideConfirmTag(bufferRef.current)
+      const askConfirm = run.buffer.includes('<VIBE_CONFIRM') && !run.buffer.includes('<VIBE_FILE')
+      const plain = hideConfirmTag(run.buffer)
       // 파일이 실제로 바뀐 경우에만 '완성' 이라고 한다.
-      const changedAny = Object.keys(files).length > 0 || structuralChangeRef.current
-      const noChangeNote = !changedAny && !truncated && bufferRef.current.includes('<VIBE_') && !askConfirm
+      const changedAny = Object.keys(files).length > 0 || run.structuralChange
+      const noChangeNote = !changedAny && !truncated && run.buffer.includes('<VIBE_') && !askConfirm
         ? '⚠️ 이번 답변에서 바뀐 파일이 없어요.' : ''
       const body = [explanation || (plain.includes('<VIBE_')
         ? (truncated || !changedAny ? '' : '완성됐습니다! 코드 탭에서 소스를 확인할 수 있어요.')
         : plain.trim()), noChangeNote].filter(Boolean).join('\n\n')
-      setMessages((prev) => {
+      runSetMessages(run, (prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = {
           role: 'assistant',
@@ -1112,21 +1210,21 @@ export default function App() {
           ...(truncated ? { truncated } : {}),
           ...(askConfirm && !truncated ? { confirm: true as const } : {}),
           // 인용된 출처를 앞에, 최대 10개
-          ...(sourcesRef.current.size ? { sources: [...sourcesRef.current.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
-          ...(outputFilesRef.current.length ? { outputs: [...outputFilesRef.current] } : {}),
-          ...(contextTokensRef.current ? { ctx: contextTokensRef.current } : {}),
+          ...(run.sources.size ? { sources: [...run.sources.values()].sort((a, b) => Number(b.cited) - Number(a.cited)).slice(0, 10) } : {}),
+          ...(run.outputFiles.length ? { outputs: [...run.outputFiles] } : {}),
+          ...(run.contextTokens ? { ctx: run.contextTokens } : {}),
           files,
           // 파일을 만든 답변만 되돌리기 지점이 된다.
-          ...(changedAny ? { snapshot: projectFilesRef.current, projectType: pType } : {}),
+          ...(changedAny ? { snapshot: run.files, projectType: pType } : {}),
         }
         return updated
       })
       // 프로젝트 파일 자동 저장(내 드라이브). 응답을 막지 않도록 뒤에서 처리한다.
-      if (backupId) bindChatProject(backupId, projects.find((p) => p.id === chatProjectIdRef.current))
-      if (USE_DRIVE && driveAutoSave && changedAny && backupId && isDriveConnected()) {
+      bindChatProject(run.chatId, projects.find((p) => p.id === run.projectId))
+      if (USE_DRIVE && driveAutoSave && changedAny && isDriveConnected()) {
         if (hasFileScope()) {
-          exportProject(backupId, chatTitle(history), projectFilesRef.current)
-            .then((r) => setDriveFolderUrl(r.url))
+          exportProject(run.chatId, chatTitle(history), run.files)
+            .then((r) => { if (isFg(run)) setDriveFolderUrl(r.url) })
             .catch((e) => setStorageError(e instanceof FileScopeError ? e.message : '드라이브 폴더에 프로젝트 파일을 저장하지 못했습니다'))
         } else if (!scopeAskedRef.current) {
           scopeAskedRef.current = true
@@ -1134,18 +1232,12 @@ export default function App() {
         }
       }
     } catch (err: unknown) {
-      pendingRealtimePatchRef.current = null
-      if (realtimePatchTimerRef.current) {
-        clearTimeout(realtimePatchTimerRef.current)
-        realtimePatchTimerRef.current = null
-      }
+      clearPatchTimer(run)
       if (controller.signal.aborted) {
-        projectFilesRef.current = prevFiles
-        setProjectFiles(prevFiles)
-        setProjectType(prevType)
-        const { explanation } = parseVibe(bufferRef.current)
-        const partial = explanation || (bufferRef.current.includes('<VIBE_') ? '' : bufferRef.current.trim())
-        setMessages((prev) => {
+        runSetFiles(run, prevFiles, prevType)
+        const { explanation } = parseVibe(run.buffer)
+        const partial = explanation || (run.buffer.includes('<VIBE_') ? '' : run.buffer.trim())
+        runSetMessages(run, (prev) => {
           const updated = [...prev]
           updated[updated.length - 1] = { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}(생성을 중지했습니다)`, files: {} }
           return updated
@@ -1153,37 +1245,44 @@ export default function App() {
         return
       }
       // 스트리밍 중 반쯤 반영된 코드는 깨져 있으므로 요청 전으로 되돌리고, 받은 본문만 남긴다.
-      projectFilesRef.current = prevFiles
-      setProjectFiles(prevFiles)
-      setProjectType(prevType)
-      const { explanation } = parseVibe(bufferRef.current)
-      const partial = explanation || (bufferRef.current.includes('<VIBE_') ? '' : bufferRef.current.trim())
+      runSetFiles(run, prevFiles, prevType)
+      const { explanation } = parseVibe(run.buffer)
+      const partial = explanation || (run.buffer.includes('<VIBE_') ? '' : run.buffer.trim())
       const message = err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다'
-      setMessages((prev) => {
+      runSetMessages(run, (prev) => {
         const updated = [...prev]
         updated[updated.length - 1] = { role: 'assistant', content: `${partial ? `${partial}\n\n` : ''}오류: ${message}`, files: {}, failed: true }
         return updated
       })
     } finally {
       wakeLock?.release().catch(() => {})
-      generationIdRef.current = null
-      pendingRealtimePatchRef.current = null
-      if (realtimePatchTimerRef.current) {
-        clearTimeout(realtimePatchTimerRef.current)
-        realtimePatchTimerRef.current = null
+      clearPatchTimer(run)
+      runsRef.current.delete(run.chatId)
+      syncRunning()
+      // 직접 멈췄거나 지운 대화가 아니면 끝났음을 알린다.
+      if (!controller.signal.aborted && !run.discarded) announceDone(run)
+      if (isFg(run)) {
+        // 화면의 대화: 완료·오류·중지 모두 이 응답을 답변 탭에 열고, 저장은 저장 effect 가 한다.
+        setAnswerIndex(history.length)
+        setVersionIndex(null)
+        unsavedRef.current = !run.discarded
+        setIsLoading(false)
+      } else if (!run.discarded) {
+        // 뒤에서 끝난 대화: 여기서 바로 저장하고 사이드바에 '새 답변' 표시를 남긴다.
+        setUnreadIds((prev) => (prev.includes(run.chatId) ? prev : [...prev, run.chatId]))
+        saveRun(run).catch(storageFailMessage('대화를 저장하지 못했습니다 (저장소에 연결할 수 없음)'))
       }
-      abortRef.current = null
-      // 완료·오류·중지 모두 이 응답을 답변 탭에 연다.
-      setAnswerIndex(history.length)
-      setVersionIndex(null)
-      setIsLoading(false)
     }
   }
 
+  // 생성을 멈춘다(브라우저 쪽 수신 + 서버 쪽 생성).
+  const stopRun = (run: Run) => {
+    run.controller.abort()
+    cancelGeneration(activeApiKey, run.generationId).catch(() => setStorageError('서버에서 진행 중인 생성을 멈추지 못했습니다'))
+  }
   const handleStop = () => {
-    abortRef.current?.abort()
-    const id = generationIdRef.current
-    if (id) cancelGeneration(activeApiKey, id).catch(() => setStorageError('서버에서 진행 중인 생성을 멈추지 못했습니다'))
+    const run = fgChatIdRef.current ? runsRef.current.get(fgChatIdRef.current) : undefined
+    if (run) stopRun(run)
   }
 
   // 출력 한도에서 잘린 답변을 이어서 만든다. 완성된 파일은 이미 프로젝트에 반영돼 있고(현재 파일로 함께 전달),
@@ -1203,7 +1302,11 @@ export default function App() {
    * 프로젝트 가져오기 핸들러
    * GitHub에서 가져온 프로젝트를 UI에 로드
    */
+  // 화면의 대화가 생성 중이면 그 Run. 직접 고친 내용(파일·저장소 연결)을 Run 에도 반영해 대화를 바꿔도 남게 한다.
+  const fgRun = () => (fgChatIdRef.current ? runsRef.current.get(fgChatIdRef.current) : undefined)
   const handleImportProject = (importedFiles: Record<string, string>, importedType: 'html' | 'react' | 'vue') => {
+    const run = fgRun()
+    if (run) { run.files = importedFiles; run.type = importedType }
     projectFilesRef.current = importedFiles
     setProjectFiles(importedFiles)
     setProjectType(importedType)
@@ -1211,6 +1314,8 @@ export default function App() {
   }
 
   const handleGithubRepoChange = (repo: GithubRepo) => {
+    const run = fgRun()
+    if (run) run.githubRepo = repo
     setGithubRepo(repo)
     unsavedRef.current = true
   }
@@ -1232,11 +1337,12 @@ export default function App() {
     setSessionKey((k) => k + 1)
     setCanvasClosed(false)
     unsavedRef.current = false
+    setIsLoading(false)
   }
 
-  // 생성 중에는 전환하지 않는다. 진행 중인 응답이 다른 대화에 섞이지 않게 하기 위함이다.
+  // 생성 중에도 새 대화·대화 전환을 할 수 있다. 떠난 대화의 생성은 뒤에서 계속되고(runsRef), 끝나면 스스로 저장한다.
   const handleNewChat = () => {
-    if (isLoading) return
+    leaveForeground()
     resetConversation()
     setChatId(null)
     setChatProjectId(null)
@@ -1244,8 +1350,42 @@ export default function App() {
     if (isMobile) setSidebarOpen(false)
   }
 
+  // 생성 중인 대화로 돌아왔을 때: 저장본이 아니라 Run 이 가진 지금 상태를 화면에 붙인다.
+  const attachRun = (run: Run) => {
+    resetConversation()
+    setDriveFolderUrl(null)
+    setChatId(run.chatId)
+    setChatProjectId(run.projectId)
+    bindChatProject(run.chatId, projects.find((p) => p.id === run.projectId))
+    chatCreatedAtRef.current = run.createdAt
+    setMessages(run.messages)
+    const ctx = run.contextTokens || ([...run.messages].reverse().find((m) => m.role === 'assistant' && m.ctx)?.ctx ?? 0)
+    contextTokensRef.current = ctx
+    setContextTokens(ctx)
+    setTokenUsage(run.turnUsage?.usage ?? null)
+    setLastCost(run.turnUsage?.cost ?? 0)
+    projectFilesRef.current = run.files
+    setProjectFiles(run.files)
+    setProjectType(run.type)
+    setGithubRepo(run.githubRepo)
+    setAnswerIndex(run.messages.length - 1)
+    setVersionIndex(null)
+    setIsLoading(true)
+    focusPanel('preview')
+    setMobileTab('chat')
+    if (isMobile) setSidebarOpen(false)
+  }
+
   const handleSelectChat = async (id: string) => {
-    if (isLoading || id === chatId || loadingChatId) return
+    if (id === chatId || loadingChatId) return
+    setUnreadIds((prev) => prev.filter((x) => x !== id))
+    setToasts((prev) => prev.filter((t) => t.chatId !== id))
+    const running = runsRef.current.get(id)
+    if (running) {
+      leaveForeground()
+      attachRun(running)
+      return
+    }
     setLoadingChatId(id)
     try {
       const chat = chatCacheRef.current.get(id) ?? await loadChat(activeApiKey, id)
@@ -1254,6 +1394,10 @@ export default function App() {
         setStorageError('대화를 찾을 수 없습니다')
         return
       }
+      // 불러오는 사이에 이 대화의 생성이 시작됐으면(드문 경우) 그쪽 상태를 쓴다.
+      const started = runsRef.current.get(id)
+      leaveForeground()
+      if (started) { attachRun(started); return }
       resetConversation()
       setDriveFolderUrl(null)
       setChatId(chat.id)
@@ -1280,8 +1424,11 @@ export default function App() {
       // 생성 도중 닫힌 대화면 서버에 남은 생성을 이어 받는다.
       const last = chat.messages[chat.messages.length - 1]
       if (last?.role === 'assistant' && last.generationId) {
-        genChatIdRef.current = chat.id   // 이어 받는 동안의 부분 백업이 이 대화 id 로 기록되도록
-        runGeneration(chat.messages.slice(0, -1), last.generationId, { files: chat.projectFiles, type: chat.projectType }, true)
+        runGeneration({
+          chatId: chat.id, history: chat.messages.slice(0, -1), generationId: last.generationId, resume: true,
+          base: { files: chat.projectFiles, type: chat.projectType },
+          githubRepo: chat.githubRepo ?? null, projectId: chat.projectId ?? null, createdAt: chat.createdAt,
+        })
       }
     } catch (e) {
       storageFailMessage('대화를 불러오지 못했습니다')(e)
@@ -1290,12 +1437,20 @@ export default function App() {
     }
   }
 
+  selectChatRef.current = handleSelectChat
+
   const handleDeleteChat = async (id: string) => {
-    if (isLoading) return
     const title = chats.find((c) => c.id === id)?.title ?? '이 대화'
-    if (!window.confirm(`'${title}' 대화를 삭제할까요? 되돌릴 수 없습니다.`)) return
+    const running = runsRef.current.get(id)
+    if (!window.confirm(`'${title}' 대화를 삭제할까요? 되돌릴 수 없습니다.${running ? '\n(생성 중인 답변도 멈춥니다)' : ''}`)) return
     try {
+      // 생성 중이면 멈추고, 끝나면서 다시 저장되지 않게 표시한다. 진행 중인 저장이 있으면 끝난 뒤에 지운다.
+      if (running) { running.discarded = true; stopRun(running) }
+      // 지우는 대화가 화면에 떠 있으면 대기 중인 자동 저장이 지운 대화를 되살리지 않게 한다.
+      if (id === fgChatIdRef.current) unsavedRef.current = false
+      await saveQueueRef.current.get(id)?.catch(() => {})
       await deleteChat(activeApiKey, id)
+      setUnreadIds((prev) => prev.filter((x) => x !== id))
       chatCacheRef.current.delete(id)
       setChats((prev) => prev.filter((c) => c.id !== id))
       if (id === chatId) handleNewChat()
@@ -1345,6 +1500,8 @@ export default function App() {
   const versionPos = versionIndex !== null && versions.includes(versionIndex) ? versions.indexOf(versionIndex) : versions.length - 1
 
   const handleFilesChange = (nextFiles: Record<string, string>) => {
+    const run = fgRun()
+    if (run) run.files = nextFiles
     projectFilesRef.current = nextFiles
     setProjectFiles(nextFiles)
     unsavedRef.current = true
@@ -1355,7 +1512,7 @@ export default function App() {
   const saveOutputToDrive = USE_DRIVE && isDriveConfigured() ? async (fid: string) => {
               if (!isDriveConnected()) { setDriveModal('request'); throw new Error('드라이브 연결이 필요해요') }
               if (!hasFileScope()) { setDriveModal('scope'); throw new Error('권한 추가가 필요해요') }
-              const id = genChatIdRef.current ?? chatId
+              const id = fgChatIdRef.current
               if (!id) throw new Error('대화가 없습니다')
               const { name: fname, blob } = await downloadOutputFile(fid)
               const url = await saveToProject(id, chatTitle(messages), `outputs/${fname}`, blob)
@@ -1373,7 +1530,11 @@ export default function App() {
       chats={chats}
       activeId={chatId}
       loadingId={loadingChatId}
-      busy={isLoading}
+      runningIds={runningIds}
+      unreadIds={unreadIds}
+      version={__APP_VERSION__}
+      note={RELEASE_NOTE}
+      notify={notifySupported() ? { on: notifyOn, onToggle: toggleNotify } : undefined}
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
@@ -1432,6 +1593,7 @@ export default function App() {
           {/* ChatPanel 은 가로 줄 안에서 너비를 잡도록 짜여 있어 남은 높이를 채우는 가로 줄로 감싼다. */}
           <div className="flex flex-1 min-h-0">
           <ChatPanel
+            chatKey={chatId ?? 'new'}
             messages={messages}
             onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
             attachError={attachError}
@@ -1500,6 +1662,19 @@ export default function App() {
           />
         </div>
       </div>
+      {toasts.length > 0 && (
+        <div className="toast-stack" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className="toast">
+              <button className="toast-open" onClick={() => { dismissToast(t.id); handleSelectChat(t.chatId) }}>
+                <span>{t.failed ? '답변 생성 중 오류가 났어요' : '답변이 완료됐어요'}</span>
+                <span>{t.title}</span>
+              </button>
+              <button className="icon-btn" aria-label="알림 닫기" onClick={() => dismissToast(t.id)}><X style={{ width: 14, height: 14 }} /></button>
+            </div>
+          ))}
+        </div>
+      )}
       {projectModal && (
         <ProjectModal
           project={projectModal === 'new' ? newProject('') : projectModal}

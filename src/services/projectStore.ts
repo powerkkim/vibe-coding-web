@@ -105,4 +105,3 @@ export function projectContext(p: Project | undefined): string {
   return parts.join('\n\n')
 }
 
-export const knowledgeChars = (p: Project) => p.knowledge.reduce((n, k) => n + k.text.length, 0)
