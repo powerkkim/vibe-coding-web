@@ -18,6 +18,11 @@ interface Props {
   runningIds: string[]
   /** 다른 대화를 보는 동안 답변이 끝난 대화(아직 열어 보지 않음) */
   unreadIds: string[]
+  /** 앱 버전과 한 줄 공지(드라이브 연결 영역 위에 보여 준다) */
+  version: string
+  note: string
+  /** 시스템 알림 설정. 브라우저가 알림을 지원하지 않으면 없음 */
+  notify?: { on: boolean; onToggle: (on: boolean) => void }
   error: string
   onSelect: (id: string) => void
   onNew: () => void
@@ -47,7 +52,7 @@ function groupLabel(updatedAt: number, todayStart: number): string {
   return '이전'
 }
 
-export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
+export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, version, note, notify, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
   const todayStart = new Date().setHours(0, 0, 0, 0)
   const projectIds = new Set(projects.map((p) => p.id))
   const inProject = (c: ChatSummary) => !!c.projectId && projectIds.has(c.projectId)
@@ -171,6 +176,16 @@ export default function Sidebar({ chats, activeId, loadingId, runningIds, unread
             </ul>
           </section>
         ))}
+      </div>
+
+      <div className="sidebar-notice flex-shrink-0">
+        <span><b>v{version}</b> · {note}</span>
+        {notify && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }} title="다른 탭이나 프로그램을 보고 있을 때 답변이 끝나면 시스템 알림을 띄워요 (앱이 열려 있는 동안)">
+            <input type="checkbox" checked={notify.on} onChange={(e) => notify.onToggle(e.target.checked)} />
+            답변 완료 시스템 알림
+          </label>
+        )}
       </div>
 
       {drive && (

@@ -54,3 +54,19 @@ function appShell(event, url) {
     return network
   })())
 }
+
+// 답변 완료 알림을 누르면 열려 있는 앱 창을 앞으로 가져와 그 대화를 열게 한다. 창이 없으면 앱을 새로 연다.
+self.addEventListener('notificationclick', event => {
+  event.notification.close()
+  const chatId = event.notification.data && event.notification.data.chatId
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    const win = wins.find(w => new URL(w.url).pathname.startsWith(BASE))
+    if (win) {
+      await win.focus().catch(() => {})
+      if (chatId) win.postMessage({ type: 'OPEN_CHAT', chatId })
+    } else {
+      await self.clients.openWindow(BASE)
+    }
+  })())
+})

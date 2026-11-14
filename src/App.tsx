@@ -27,6 +27,9 @@ import { canDriveStaySignedIn, connectDrive, disconnectDrive, driveAccount, driv
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
+import { notifyEnabled, notifySupported, onNotificationOpen, setNotifyEnabled, showSystemNotification } from './services/notify'
+import { RELEASE_NOTE } from './releaseNote'
+import { X } from './icons'
 import Header from './components/Header'  // 상단 헤더 (로고, 설정, API 키)
 import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
@@ -104,6 +107,10 @@ function fingerprintFiles(files: Record<string, string>): string {
  * 과도한 리렌더링 방지를 위한 성능 최적화
  */
 const REALTIME_PATCH_THROTTLE_MS = 150
+// 앱 안 알림(토스트)이 떠 있는 시간
+const TOAST_MS = 8000
+// 탭 제목 원본(버전 포함). 새 답변이 있으면 앞에 개수를 붙인다.
+const BASE_TITLE = document.title
 
 /**
  * 진행 중인 생성 1건. 대화마다 하나씩, 여러 대화에서 동시에 돌 수 있다.
@@ -234,6 +241,48 @@ export default function App() {
   const [runningIds, setRunningIds] = useState<string[]>([])
   const [unreadIds, setUnreadIds] = useState<string[]>([])
   const syncRunning = () => setRunningIds([...runsRef.current.keys()])
+
+  // ── 답변 완료 알림 ──
+  // 다른 대화의 답변이 끝나면: 앱 안 알림(토스트) + 사이드바 점 + 탭 제목 개수. 화면을 보고 있지 않으면 시스템 알림(켠 경우)도 띄운다.
+  const [toasts, setToasts] = useState<{ id: number; chatId: string; title: string; failed: boolean }[]>([])
+  const toastSeqRef = useRef(0)
+  const dismissToast = (id: number) => setToasts((prev) => prev.filter((t) => t.id !== id))
+  const [notifyOn, setNotifyOn] = useState(notifyEnabled)
+  // 화면의 대화가 끝났는데 사용자가 다른 탭·창을 보고 있었다. 돌아오면 지운다.
+  const [attention, setAttention] = useState(false)
+  // 알림에서 대화를 열 때 최신 handleSelectChat 을 부르기 위한 ref
+  const selectChatRef = useRef<(id: string) => void>(() => {})
+  const announceDone = (run: Run) => {
+    const failed = !!run.messages[run.messages.length - 1]?.failed
+    const title = chatTitle(run.messages)
+    const away = document.visibilityState !== 'visible' || !document.hasFocus()
+    if (!isFg(run)) {
+      const id = ++toastSeqRef.current
+      setToasts((prev) => [...prev.filter((t) => t.chatId !== run.chatId), { id, chatId: run.chatId, title, failed }].slice(-3))
+      setTimeout(() => dismissToast(id), TOAST_MS)
+    } else if (away) {
+      setAttention(true)
+    } else {
+      return
+    }
+    showSystemNotification(run.chatId, failed ? '답변 생성 중 오류가 났어요' : '답변이 완료됐어요', title, (id) => selectChatRef.current(id))
+  }
+  useEffect(() => {
+    const n = unreadIds.length + (attention ? 1 : 0)
+    document.title = n ? `(${n}) ${BASE_TITLE}` : BASE_TITLE
+  }, [unreadIds.length, attention])
+  useEffect(() => {
+    const back = () => { if (document.visibilityState === 'visible') setAttention(false) }
+    document.addEventListener('visibilitychange', back)
+    window.addEventListener('focus', back)
+    const off = onNotificationOpen((id) => selectChatRef.current(id))
+    return () => { document.removeEventListener('visibilitychange', back); window.removeEventListener('focus', back); off() }
+  }, [])
+  const toggleNotify = async (on: boolean) => {
+    const ok = await setNotifyEnabled(on)
+    setNotifyOn(ok)
+    if (on && !ok) setStorageError('알림이 차단돼 있어요. 브라우저 주소창의 사이트 설정에서 알림을 허용한 뒤 다시 켜 주세요')
+  }
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null)
   const [lastCost, setLastCost] = useState(0)
   const [usageTotals, setUsageTotals] = useState(loadUsage)
@@ -252,6 +301,7 @@ export default function App() {
       ...usage,
       promptTokens: prev.usage.promptTokens + usage.promptTokens,
       cacheWriteTokens: prev.usage.cacheWriteTokens + usage.cacheWriteTokens,
+      cacheWrite1hTokens: (prev.usage.cacheWrite1hTokens ?? 0) + (usage.cacheWrite1hTokens ?? 0),
       cacheReadTokens: prev.usage.cacheReadTokens + usage.cacheReadTokens,
       completionTokens: prev.usage.completionTokens + usage.completionTokens,
       totalTokens: prev.usage.totalTokens + usage.totalTokens,
@@ -1209,6 +1259,8 @@ export default function App() {
       clearPatchTimer(run)
       runsRef.current.delete(run.chatId)
       syncRunning()
+      // 직접 멈췄거나 지운 대화가 아니면 끝났음을 알린다.
+      if (!controller.signal.aborted && !run.discarded) announceDone(run)
       if (isFg(run)) {
         // 화면의 대화: 완료·오류·중지 모두 이 응답을 답변 탭에 열고, 저장은 저장 effect 가 한다.
         setAnswerIndex(history.length)
@@ -1327,6 +1379,7 @@ export default function App() {
   const handleSelectChat = async (id: string) => {
     if (id === chatId || loadingChatId) return
     setUnreadIds((prev) => prev.filter((x) => x !== id))
+    setToasts((prev) => prev.filter((t) => t.chatId !== id))
     const running = runsRef.current.get(id)
     if (running) {
       leaveForeground()
@@ -1383,6 +1436,8 @@ export default function App() {
       setLoadingChatId(null)
     }
   }
+
+  selectChatRef.current = handleSelectChat
 
   const handleDeleteChat = async (id: string) => {
     const title = chats.find((c) => c.id === id)?.title ?? '이 대화'
@@ -1477,6 +1532,9 @@ export default function App() {
       loadingId={loadingChatId}
       runningIds={runningIds}
       unreadIds={unreadIds}
+      version={__APP_VERSION__}
+      note={RELEASE_NOTE}
+      notify={notifySupported() ? { on: notifyOn, onToggle: toggleNotify } : undefined}
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
@@ -1535,6 +1593,7 @@ export default function App() {
           {/* ChatPanel 은 가로 줄 안에서 너비를 잡도록 짜여 있어 남은 높이를 채우는 가로 줄로 감싼다. */}
           <div className="flex flex-1 min-h-0">
           <ChatPanel
+            chatKey={chatId ?? 'new'}
             messages={messages}
             onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
             attachError={attachError}
@@ -1603,6 +1662,19 @@ export default function App() {
           />
         </div>
       </div>
+      {toasts.length > 0 && (
+        <div className="toast-stack" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className="toast">
+              <button className="toast-open" onClick={() => { dismissToast(t.id); handleSelectChat(t.chatId) }}>
+                <span>{t.failed ? '답변 생성 중 오류가 났어요' : '답변이 완료됐어요'}</span>
+                <span>{t.title}</span>
+              </button>
+              <button className="icon-btn" aria-label="알림 닫기" onClick={() => dismissToast(t.id)}><X style={{ width: 14, height: 14 }} /></button>
+            </div>
+          ))}
+        </div>
+      )}
       {projectModal && (
         <ProjectModal
           project={projectModal === 'new' ? newProject('') : projectModal}

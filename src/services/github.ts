@@ -582,75 +582,6 @@ function parseGithubUrl(url: string): { owner: string; repo: string; branch?: st
   return { owner: match[1], repo: match[2], branch: match[3] }
 }
 
-/**
- * GitHub URL 안전 파싱 (실패 시 null 반환)
- * throw 발생 없이 성공/실패를 null로 구분
- * 
- * @param url - 파싱할 URL
- * @returns {{ owner, repo, branch? }} 파싱 성공 시 저장소 정보, 실패 시 null
- */
-export function tryParseGithubUrl(url: string): { owner: string; repo: string; branch?: string } | null {
-  try {
-    const match = url.trim().replace(/\.git$/, '').match(/github\.com\/([^/]+)\/([^/]+?)(?:\/tree\/([^/?#]+))?(?:[/?#].*)?$/)
-    if (!match) return null
-    return { owner: match[1], repo: match[2], branch: match[3] }
-  } catch {
-    return null
-  }
-}
-
-interface ProjectCache {
-  files: Record<string, string>
-  projectType: 'html' | 'react' | 'vue'
-  branch: string
-  cachedAt: number
-}
-
-const CACHE_PREFIX = 'vibe_project_'
-
-/**
- * localStorage에서 캐시된 프로젝트 파일 조회
- * 빠른 재방문/새로고침 시 API 호출 없이 로컬 캐시 사용
- * 
- * @param owner - 저장소 소유자
- * @param repo - 저장소 이름
- * @returns 캐시된 프로젝트 정보 (파일, 타입, 브랜치, 캐시 시간)
- */
-export function getCachedProject(owner: string, repo: string): ProjectCache | null {
-  try {
-    const raw = localStorage.getItem(`${CACHE_PREFIX}${owner}/${repo}`)
-    return raw ? (JSON.parse(raw) as ProjectCache) : null
-  } catch {
-    return null
-  }
-}
-
-/**
- * 프로젝트 정보를 localStorage에 캐시
- * 가져온 파일들을 로컬에 임시 저장하여 재방문 시 빠른 로딩 제공
- * localStorage 용량 초과 시 무시 (에러 throw 없음)
- * 
- * @param owner - 저장소 소유자
- * @param repo - 저장소 이름
- * @param files - 프로젝트 파일 객체
- * @param projectType - 프로젝트 타입 (html/react/vue)
- * @param branch - 대상 브랜치
- */
-export function setCachedProject(
-  owner: string,
-  repo: string,
-  files: Record<string, string>,
-  projectType: 'html' | 'react' | 'vue',
-  branch: string,
-): void {
-  try {
-    const cache: ProjectCache = { files, projectType, branch, cachedAt: Date.now() }
-    localStorage.setItem(`${CACHE_PREFIX}${owner}/${repo}`, JSON.stringify(cache))
-  } catch {
-    // localStorage 용량 초과 — 무시
-  }
-}
-
 const TEXT_EXT = /\.(html|css|js|jsx|ts|tsx|json|md|txt|svg|vue|mjs|cjs|yaml|yml|toml|gitignore|prettierrc|eslintrc|babelrc|env\.example|nvmrc|editorconfig)$/i
 const SKIP_DIRS = /^(node_modules|\.git|dist|build|\.next|\.nuxt|coverage|\.cache)\//
 
@@ -720,8 +651,6 @@ export async function fetchRepoFiles(
   }
 
   if (Object.keys(files).length === 0) throw new Error('텍스트 파일을 찾을 수 없습니다')
-  const projectType = detectProjectType(files)
-  setCachedProject(owner, repo, files, projectType, branch)
   return { files, owner, repo, branch }
 }
 

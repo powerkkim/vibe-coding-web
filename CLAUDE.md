@@ -1,6 +1,6 @@
 # CLAUDE.md — vibe-coding-web 작업 안내
 
-Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-14 (앱 v0.4.0 기준).
+Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-14 (앱 v0.5.0 기준).
 
 ## 프로젝트
 
@@ -17,7 +17,7 @@ Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구�
    - 버그·작은 변경: `0.x.+1` / 기능 추가: `0.+1.0`
    - 버전은 창 제목에 자동 표시된다(`vite.config.ts`). 커밋 메시지와 보고에 버전을 적는다.
    - 문서만 바꾼 경우(README·CLAUDE.md·CHANGELOG.md)는 버전을 올리지 않는다.
-   - 버전을 올리면 `CHANGELOG.md` 맨 위에 항목을 추가한다.
+   - 버전을 올리면 `CHANGELOG.md` 맨 위에 항목을 추가하고, 사이드바 공지 한 줄(`src/releaseNote.ts`)을 이번 변경에 맞게 고친다.
 5. **드라이브 데이터 보존**: 구글 드라이브에 저장된 기존 대화·프로젝트·파일이 절대 날아가지 않게 한다. 저장 형식·위치를 바꿀 때는 먼저 상의한다.
 6. **검증**: 배포 전 Playwright 모의 테스트 + 기존 회귀 테스트를 돌리고 결과를 보고한다. 실제 기기·실계정에서 확인하지 못한 것은 "미확인"이라고 적는다.
 7. **비밀값**: API 키·토큰·클라이언트 비밀값을 코드·커밋·`VITE_*` 변수에 넣지 않는다. `VITE_*` 는 빌드 결과물에 그대로 들어간다.
@@ -38,8 +38,10 @@ src/
     driveExport.ts        결과물 파일을 내 드라이브 "Vibe Coding/<프로젝트>/<대화>/"에 저장
     github.ts             GitHub 가져오기·커밋·푸시·Pages 배포
     previewSandbox.ts     미리보기 격리(sandbox 설정, 저장소 대체 코드, 격리된 새 탭)
+    notify.ts             답변 완료 시스템 알림(켜기·끄기, 서비스워커 알림)
     memoryStore.ts, usage.ts, localStore.ts …
-public/sw.js              서비스워커: PWA 앱 화면 캐시
+  releaseNote.ts          사이드바 아래 한 줄 공지
+public/sw.js              서비스워커: PWA 앱 화면 캐시, 알림 클릭 처리
 worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object) + 구글 로그인 유지
 .github/workflows/        deploy.yml(Pages), worker.yml(Worker)
 ```
