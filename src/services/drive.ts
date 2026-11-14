@@ -23,6 +23,10 @@ const TOKEN_KEY = 'vibe_gdrive_token'
 // 연결했던 Google 계정. 토큰이 만료돼도 남겨 두고, 다시 연결할 때 같은 계정으로 계정 선택 없이 바로 붙인다.
 // '연결 해제'를 눌렀을 때만 지운다.
 const ACCOUNT_KEY = 'vibe_gdrive_account'
+// 로그인 유지: 서버(worker)가 구글 갱신 토큰을 암호화해 돌려주면 여기에 둔다(서버만 풀 수 있다).
+// 있으면 1시간 토큰이 끝나기 전에 팝업 없이 새 토큰을 받는다. 없거나 서버가 안 되면 예전 방식(팝업 재로그인)으로 동작한다.
+const REFRESH_KEY = 'vibe_gdrive_refresh'
+const AUTH_URL = ((import.meta.env.VITE_AUTH_SERVER_URL as string | undefined) || (import.meta.env.VITE_GENERATION_SERVER_URL as string | undefined) || '').trim().replace(/\/+$/, '')
 const API = 'https://www.googleapis.com/drive/v3'
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3'
 
@@ -31,18 +35,34 @@ export class DriveAuthError extends Error {
   constructor() { super('Google 드라이브 연결이 필요합니다') }
 }
 
-interface TokenResponse { access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string }
+interface TokenResponse { access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string; refresh?: string }
+interface CodeResponse { code?: string; scope?: string; error?: string; error_description?: string }
+interface CodeClient { requestCode: () => void }
 interface TokenClient { requestAccessToken: (o?: { prompt?: string }) => void; callback: (r: TokenResponse) => void; error_callback?: (e: { type: string; message?: string }) => void }
 declare global {
-  interface Window { google?: { accounts: { oauth2: { initTokenClient: (c: Record<string, unknown>) => TokenClient; revoke: (t: string, cb?: () => void) => void } } } }
+  interface Window { google?: { accounts: { oauth2: { initTokenClient: (c: Record<string, unknown>) => TokenClient; initCodeClient: (c: Record<string, unknown>) => CodeClient; revoke: (t: string, cb?: () => void) => void } } } }
 }
 
 type Saved = { token: string; expiresAt: number; scope?: string }
 export type DriveAccount = { email: string; name?: string }
 let saved: Saved | null = readSaved()
 let account: DriveAccount | null = readAccount()
+let refreshBlob: string | null = (() => { try { return localStorage.getItem(REFRESH_KEY) } catch { return null } })()
+function setRefresh(v: string | null) {
+  refreshBlob = v
+  try { if (v) localStorage.setItem(REFRESH_KEY, v); else localStorage.removeItem(REFRESH_KEY) } catch { /* 무시 */ }
+}
+/** 서버 로그인 유지를 쓸 수 있는가(서버 주소가 있고, 이번 세션에 서버가 '설정 안 됨'이라고 하지 않았다) */
+let serverAuthOff = false
+const serverAuth = () => !!AUTH_URL && !serverAuthOff
+/** 팝업 없이 연결을 유지하고 있는가(갱신 토큰 보유) */
+export function driveStaysSignedIn() { return !!refreshBlob }
+/** 로그인 유지를 켤 수 있는가(서버가 있음) */
+export function canDriveStaySignedIn() { return serverAuth() }
 const listeners = new Set<(connected: boolean) => void>()
 let expiryTimer: ReturnType<typeof setTimeout> | undefined
+// 만료 5분 전 조용한 갱신 타이머(scheduleExpiry 가 모듈 시작 때 바로 쓰므로 위에 둔다)
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
 scheduleExpiry()
 
 function readAccount(): DriveAccount | null {
@@ -62,6 +82,9 @@ function scheduleExpiry() {
   if (!saved) return
   const ms = saved.expiresAt - 60_000 - Date.now()
   expiryTimer = setTimeout(() => listeners.forEach((fn) => fn(isDriveConnected())), Math.max(0, Math.min(ms, 2 ** 31 - 1)))
+  // 갱신 토큰이 있으면 만료 5분 전에 조용히 새 토큰을 받는다(팝업 없음, 사용자 동작 필요 없음).
+  clearTimeout(refreshTimer)
+  if (refreshBlob) refreshTimer = setTimeout(() => { silentRefresh().catch(() => {}) }, Math.max(0, Math.min(saved.expiresAt - 5 * 60_000 - Date.now(), 2 ** 31 - 1)))
 }
 
 function readSaved(): Saved | null {
@@ -117,20 +140,90 @@ let clientScope = ''
 let waiting: { resolve: () => void; reject: (e: Error) => void } | null = null
 let renewing: Promise<void> | null = null
 
+/** 받은 액세스 토큰을 저장하고, 어느 계정인지 확인해 기억한다(목록 표시·다음 재연결의 login_hint). */
+async function applyToken(r: TokenResponse): Promise<void> {
+  const token = { token: r.access_token!, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000, scope: r.scope }
+  if (r.scope?.includes(SCOPE_FILE)) { try { localStorage.setItem(FILE_SCOPE_KEY, '1') } catch { /* 무시 */ } }
+  try {
+    const res = await fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
+    const b = res.ok ? await res.json() as { user?: { emailAddress?: string; displayName?: string } } : null
+    if (b?.user?.emailAddress) {
+      // 다른 계정으로 바뀌었으면 이전 계정의 갱신 토큰은 쓰지 않는다.
+      if (account && account.email !== b.user.emailAddress && !r.refresh) setRefresh(null)
+      setAccount({ email: b.user.emailAddress, name: b.user.displayName })
+    }
+  } catch { /* 연결은 유지 */ }
+  if (r.refresh) setRefresh(r.refresh)
+  setSaved(token)
+}
+
 function onToken(r: TokenResponse) {
   const w = waiting
   waiting = null
   if (!r.access_token) return w?.reject(new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다'))
-  const token = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 3600) * 1000, scope: r.scope }
-  if (r.scope?.includes(SCOPE_FILE)) { try { localStorage.setItem(FILE_SCOPE_KEY, '1') } catch { /* 무시 */ } }
-  // 어느 계정에 붙었는지 확인해 기억한다(목록 표시·다음 재연결의 login_hint). 실패해도 연결은 유지한다.
-  fetch(`${API}/about?fields=user(emailAddress,displayName)`, { headers: { Authorization: `Bearer ${token.token}` } })
-    .then((res) => (res.ok ? res.json() : null))
-    .then((b: { user?: { emailAddress?: string; displayName?: string } } | null) => {
-      if (b?.user?.emailAddress) setAccount({ email: b.user.emailAddress, name: b.user.displayName })
+  applyToken(r).then(() => w?.resolve(), () => w?.resolve())
+}
+
+// ── 서버 로그인 유지(코드 방식 + 갱신 토큰) ──────────────────────
+async function authPost(action: 'exchange' | 'refresh', body: Record<string, unknown>): Promise<TokenResponse & { status: number }> {
+  const res = await fetch(`${AUTH_URL}/api/auth/google/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const json = await res.json().catch(() => ({})) as TokenResponse
+  if (res.status === 501) serverAuthOff = true   // 서버에 구글 비밀값이 없다 → 이번 세션은 예전 방식
+  return { ...json, status: res.status }
+}
+
+let silentRefreshing: Promise<boolean> | null = null
+/** 갱신 토큰으로 팝업 없이 새 토큰을 받는다. 성공하면 true. 권한이 끊겼으면 갱신 토큰을 지우고 false(예전 방식으로 돌아감). */
+function silentRefresh(): Promise<boolean> {
+  if (!refreshBlob || !serverAuth()) return Promise.resolve(false)
+  silentRefreshing ??= (async () => {
+    try {
+      const r = await authPost('refresh', { refresh: refreshBlob })
+      if (r.access_token) { await applyToken(r); return true }
+      if (r.status === 401) setRefresh(null)   // invalid_grant: 사용자가 권한을 끊었거나 비밀번호를 바꿈
+      return false
+    } catch { return false } finally { silentRefreshing = null }
+  })()
+  return silentRefreshing
+}
+
+let codeClient: CodeClient | null = null
+let codeClientKey = ''
+let codeWaiting: { resolve: (r: CodeResponse) => void; reject: (e: Error) => void } | null = null
+function ensureCodeClient(withFiles: boolean): CodeClient | null {
+  if (!window.google?.accounts?.oauth2?.initCodeClient || !GOOGLE_CLIENT_ID) return null
+  const scope = withFiles ? `${SCOPE_APPDATA} ${SCOPE_FILE}` : SCOPE_APPDATA
+  const key = `${scope}|${account?.email ?? ''}`
+  if (!codeClient || codeClientKey !== key) {
+    codeClientKey = key
+    codeClient = window.google.accounts.oauth2.initCodeClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope,
+      include_granted_scopes: true,
+      ux_mode: 'popup',
+      ...(account ? { login_hint: account.email } : { select_account: true }),
+      callback: (r: CodeResponse) => { const w = codeWaiting; codeWaiting = null; w?.resolve(r) },
+      error_callback: (e: { type: string; message?: string }) => {
+        const w = codeWaiting
+        codeWaiting = null
+        w?.reject(new Error(e.type === 'popup_closed' ? '로그인 창이 닫혔습니다' : e.type === 'popup_failed_to_open' ? '팝업이 차단됐습니다' : e.message || e.type))
+      },
     })
-    .catch(() => {})
-    .finally(() => { setSaved(token); w?.resolve() })
+  }
+  return codeClient
+}
+
+/** 코드 방식 로그인(팝업 1번) → 서버가 토큰과 암호화한 갱신 토큰으로 바꿔 준다. 반드시 클릭 안에서 동기적으로 불러야 한다. */
+function connectWithCode(c: CodeClient): Promise<void> {
+  if (renewing) return renewing
+  renewing = (async () => {
+    const r = await new Promise<CodeResponse>((resolve, reject) => { codeWaiting = { resolve, reject }; c.requestCode() })
+    if (!r.code) throw new Error(r.error_description || r.error || '드라이브 연결이 거부됐습니다')
+    const t = await authPost('exchange', { code: r.code })
+    if (!t.access_token) throw new Error(t.status === 501 ? 'SERVER_AUTH_OFF' : `드라이브 연결에 실패했습니다 (${t.error ?? t.status})`)
+    await applyToken(t)
+  })().finally(() => { renewing = null })
+  return renewing
 }
 
 /**
@@ -183,6 +276,23 @@ export async function connectDrive(opts: { withFiles?: boolean } = {}): Promise<
   if (!GOOGLE_CLIENT_ID) throw new Error('VITE_GOOGLE_CLIENT_ID 가 설정되지 않았습니다')
   if (renewing) return renewing
   const withFiles = opts.withFiles ?? (!account || fileScopeConsented())
+  // 1) 갱신 토큰이 있으면 팝업 없이 다시 붙는다(권한 추가가 아닐 때).
+  if (refreshBlob && !(withFiles && !fileScopeConsented()) && await silentRefresh()) return
+  // 2) 서버가 있으면 코드 방식으로 한 번 로그인해 갱신 토큰을 받는다(이후 1시간마다 다시 로그인하지 않음).
+  if (serverAuth()) {
+    const cc = ensureCodeClient(withFiles) ?? (await loadGis(), ensureCodeClient(withFiles))
+    if (cc) {
+      try {
+        await connectWithCode(cc)
+        if (withFiles && !hasFileScope()) throw new Error('드라이브 파일 저장 권한이 허용되지 않았습니다')
+        return
+      } catch (e) {
+        // 서버에 구글 설정이 없으면 예전 방식으로 이어서 연결한다. 그 밖의 오류(창 닫힘 등)는 그대로 알린다.
+        if (!(e instanceof Error && e.message === 'SERVER_AUTH_OFF')) throw e
+      }
+    }
+  }
+  // 3) 예전 방식(1시간 토큰, 팝업 재로그인)
   // 스크립트가 아직 없으면 불러온 뒤 연다(첫 연결). 이때는 팝업이 막힐 수 있어 미리 로드해 둔다(아래 자동 갱신).
   const c = ensureClient(withFiles) ?? (await loadGis(), ensureClient(withFiles))
   if (!c) throw new Error('Google 로그인 스크립트를 불러오지 못했습니다')
@@ -204,6 +314,8 @@ function maybeRenew() {
   if (!account || renewing || Date.now() - lastAttempt < RETRY_AFTER_MS) return
   const remaining = saved ? saved.expiresAt - Date.now() : -1
   if (remaining > RENEW_BEFORE_MS) return
+  // 갱신 토큰이 있으면 팝업 없이(타이머가 놓쳤을 때 대비)
+  if (refreshBlob && serverAuth()) { lastAttempt = Date.now(); silentRefresh().catch(() => {}); return }
   const c = ensureClient()
   if (!c) return
   lastAttempt = Date.now()
@@ -213,7 +325,16 @@ function maybeRenew() {
 function installAutoRenew() {
   if (typeof window === 'undefined' || !GOOGLE_CLIENT_ID) return
   // 로그인 팝업을 클릭 안에서 바로 열 수 있게 스크립트를 미리 받아 둔다(늦게 받으면 팝업이 차단될 수 있다).
-  loadGis().then(() => ensureClient()).catch(() => {})
+  loadGis().then(() => { ensureClient(); if (serverAuth()) ensureCodeClient(!account || fileScopeConsented()) }).catch(() => {})
+  // 앱을 열었는데 토큰이 만료돼 있으면 갱신 토큰으로 바로 다시 붙는다(기다리는 쪽은 waitForRenewal).
+  if (refreshBlob && account && !isDriveConnected() && serverAuth()) {
+    renewing = silentRefresh().then(() => undefined).finally(() => { renewing = null })
+  }
+  // 화면이 다시 보일 때(폰에서 앱으로 돌아옴) 만료가 가까우면 조용히 갱신한다.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && refreshBlob && saved && saved.expiresAt - Date.now() < RENEW_BEFORE_MS) silentRefresh().catch(() => {})
+    else if (document.visibilityState === 'visible' && refreshBlob && !saved && account) silentRefresh().catch(() => {})
+  })
   // 사용자 활성화로 인정되는 이벤트: 마우스는 pointerdown, 터치는 pointerup, 그리고 키 입력.
   document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') maybeRenew() }, true)
   document.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') maybeRenew() }, true)
@@ -224,6 +345,7 @@ installAutoRenew()
 export function disconnectDrive() {
   const t = saved?.token
   setAccount(null)
+  setRefresh(null)
   try { localStorage.removeItem(FILE_SCOPE_KEY) } catch { /* 무시 */ }
   setSaved(null)
   if (t) window.google?.accounts.oauth2.revoke(t)
@@ -235,8 +357,10 @@ export const DRIVE_API = API
 export const DRIVE_UPLOAD = UPLOAD
 
 async function driveFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  if (!isDriveConnected()) throw new DriveAuthError()
-  const res = await fetch(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${saved!.token}` } })
+  // 만료됐어도 갱신 토큰이 있으면 팝업 없이 새로 받아 이어 간다.
+  if (!isDriveConnected() && !(await silentRefresh())) throw new DriveAuthError()
+  let res = await fetch(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${saved!.token}` } })
+  if (res.status === 401 && await silentRefresh()) res = await fetch(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${saved!.token}` } })
   if (res.status === 401) { setSaved(null); throw new DriveAuthError() }
   if (!res.ok && res.status !== 404) throw new Error(`Google 드라이브 HTTP ${res.status}`)
   return res

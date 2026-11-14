@@ -23,7 +23,7 @@ import type { Project } from './services/projectStore'
 import { bindChatProject, exportProject, FileScopeError, cleanFileName, moveChatFolder, renameProjectFolder, importPicked, isPickerConfigured, listFolder, loadAttachment, pickDriveFile, readAttachmentText, readFromProject, saveToProject } from './services/driveExport'
 import type { PickerDoc } from './services/driveExport'
 import { downloadOutputFile } from './services/ai'
-import { connectDrive, disconnectDrive, driveAccount, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
+import { canDriveStaySignedIn, connectDrive, disconnectDrive, driveAccount, driveStaysSignedIn, hasFileScope, DriveAuthError, isDriveConfigured, isDriveConnected, isDriveExpired, onDriveChange } from './services/drive'
 import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
@@ -1385,7 +1385,7 @@ export default function App() {
       onMoveChat={handleMoveChat}
       onDelete={handleDeleteChat}
       onClose={toggleSidebar}
-      drive={USE_DRIVE ? { autoSave: driveAutoSave, onAutoSave: toggleDriveAutoSave, folderUrl: driveFolderUrl, configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive } : undefined}
+      drive={USE_DRIVE ? { autoSave: driveAutoSave, onAutoSave: toggleDriveAutoSave, folderUrl: driveFolderUrl, configured: isDriveConfigured(), connected: driveConnected, expired: !driveConnected && isDriveExpired(), account: driveAccount()?.email, busy: driveBusy, onConnect: handleConnectDrive, onDisconnect: handleDisconnectDrive, canStaySignedIn: canDriveStaySignedIn(), staySignedIn: driveStaysSignedIn(), onStaySignedIn: handleConnectDrive } : undefined}
     />
   )
 
