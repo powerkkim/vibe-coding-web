@@ -20,7 +20,7 @@ interface Props {
   onToggleSidebar: () => void
   theme: 'light' | 'dark'
   onToggleTheme: () => void
-  // 새 대화 시작. 페이지를 새로고침하지 않고 화면 상태만 비운다. 생성 중(busy)에는 막는다.
+  // 새 대화 시작. 페이지를 새로고침하지 않고 화면 상태만 비운다. 생성 중에도 된다(생성은 뒤에서 계속).
   onNewChat: () => void
   busy: boolean
   // 결과물이 있는데 미리보기가 닫혀 있을 때만 넘긴다. 누르면 최신 결과물로 미리보기를 연다.
@@ -143,8 +143,7 @@ export default function Header({ apiKey, model, onApiKeyChange, onModelChange, m
             {theme === 'dark' ? <Sun style={{ width: 17, height: 17 }} /> : <Moon style={{ width: 17, height: 17 }} />}
           </button>
 
-          <button onClick={onNewChat} disabled={busy} className="icon-btn"
-            aria-label={busy ? '생성 중에는 새 대화를 시작할 수 없습니다' : '새 대화'}>
+          <button onClick={onNewChat} className="icon-btn" aria-label="새 대화">
             <SquarePen style={{ width: 17, height: 17 }} />
           </button>
         </div>

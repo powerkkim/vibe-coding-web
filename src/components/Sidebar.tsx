@@ -7,14 +7,17 @@ import type { ChatListItem as ChatSummary } from '../services/chatStore'
  * Sidebar: 저장된 대화 목록
  *
  * 최근 수정 순으로 오늘 / 어제 / 지난 7일 / 이전 묶음으로 보여준다.
- * 응답 생성 중(busy)에는 대화 전환·새 대화·삭제를 막는다. 진행 중인 스트림이 다른 대화에 섞이지 않게 하기 위함이다.
+ * 응답 생성 중에도 대화 전환·새 대화·삭제를 할 수 있다. 생성 중인 대화(runningIds)와 뒤에서 끝난 새 답변(unreadIds)을 표시한다.
  */
 interface Props {
   chats: ChatSummary[]
   activeId: string | null
   // 불러오는 중인 대화. 응답 전에도 이 항목을 선택된 것으로 표시한다.
   loadingId: string | null
-  busy: boolean
+  /** 지금 답변을 생성 중인 대화 */
+  runningIds: string[]
+  /** 다른 대화를 보는 동안 답변이 끝난 대화(아직 열어 보지 않음) */
+  unreadIds: string[]
   error: string
   onSelect: (id: string) => void
   onNew: () => void
@@ -44,7 +47,7 @@ function groupLabel(updatedAt: number, todayStart: number): string {
   return '이전'
 }
 
-export default function Sidebar({ chats, activeId, loadingId, busy, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
+export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
   const todayStart = new Date().setHours(0, 0, 0, 0)
   const projectIds = new Set(projects.map((p) => p.id))
   const inProject = (c: ChatSummary) => !!c.projectId && projectIds.has(c.projectId)
@@ -62,21 +65,26 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
 
   const row = (chat: ChatSummary) => (
     <li key={chat.id} className="sidebar-item" data-active={chat.id === (loadingId ?? activeId)} aria-busy={chat.id === loadingId} style={{ position: 'relative' }}>
-      <button onClick={() => onSelect(chat.id)} disabled={busy} className="sidebar-item-open" title={chat.title}>
+      <button onClick={() => onSelect(chat.id)} className="sidebar-item-open" title={chat.title}>
         {chat.id === loadingId
           ? <Loader2 aria-label="불러오는 중" className="motion-safe:animate-spin" style={{ width: 14, height: 14, flexShrink: 0 }} />
-          : <MessageSquare aria-hidden="true" style={{ width: 14, height: 14, flexShrink: 0 }} />}
+          : runningIds.includes(chat.id)
+            ? <Loader2 aria-label="생성 중" className="motion-safe:animate-spin" style={{ width: 14, height: 14, flexShrink: 0, color: 'var(--accent)' }} />
+            : <MessageSquare aria-hidden="true" style={{ width: 14, height: 14, flexShrink: 0 }} />}
         <span className="truncate" style={chat.driveOnly ? { opacity: 0.55 } : undefined}>{chat.title}</span>
+        {unreadIds.includes(chat.id) && chat.id !== activeId && (
+          <span role="status" aria-label="새 답변" title="새 답변이 도착했어요" style={{ marginLeft: 'auto', flexShrink: 0, width: 8, height: 8, borderRadius: 4, background: 'var(--accent)' }} />
+        )}
         {chat.pending && drive?.connected === false && drive.expired && (
           <span title="드라이브를 다시 연결하면 자동으로 올라갑니다" style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 10, color: 'var(--warn)' }}>대기</span>
         )}
       </button>
       {projects.length > 0 && (
-        <button onClick={() => setMoveMenu(moveMenu === chat.id ? null : chat.id)} disabled={busy} className="sidebar-item-delete" title="프로젝트로 옮기기" aria-label={`${chat.title} 프로젝트로 옮기기`} aria-expanded={moveMenu === chat.id}>
+        <button onClick={() => setMoveMenu(moveMenu === chat.id ? null : chat.id)} className="sidebar-item-delete" title="프로젝트로 옮기기" aria-label={`${chat.title} 프로젝트로 옮기기`} aria-expanded={moveMenu === chat.id}>
           <Ellipsis style={{ width: 14, height: 14 }} />
         </button>
       )}
-      <button onClick={() => onDelete(chat.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${chat.title} 삭제`}>
+      <button onClick={() => onDelete(chat.id)} className="sidebar-item-delete tip" aria-label={`${chat.title} 삭제`}>
         <Trash2 style={{ width: 14, height: 14 }} />
       </button>
       {moveMenu === chat.id && (
@@ -103,11 +111,11 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
   return (
     <nav aria-label="대화 목록" className="sidebar flex flex-col h-full">
       <div className="p-3 flex-shrink-0 flex items-center gap-2">
-        <button onClick={onNew} disabled={busy} className="sidebar-new">
+        <button onClick={onNew} className="sidebar-new">
           <Plus style={{ width: 16, height: 16 }} />
           <span>새 대화</span>
         </button>
-        <button onClick={onNewProject} disabled={busy} className="icon-btn tip" aria-label="새 프로젝트">
+        <button onClick={onNewProject} className="icon-btn tip" aria-label="새 프로젝트">
           <FolderGit2 style={{ width: 18, height: 18 }} />
         </button>
         <button onClick={onClose} className="icon-btn" aria-label="대화 목록 접기" aria-expanded>
@@ -130,7 +138,7 @@ export default function Sidebar({ chats, activeId, loadingId, busy, error, onSel
                         <span className="truncate" style={{ fontWeight: 600 }}>📁 {p.name}</span>
                         <span style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 11, color: 'var(--txt-3)' }}>{items.length}</span>
                       </button>
-                      <button onClick={() => onNewChatInProject(p.id)} disabled={busy} className="sidebar-item-delete tip" aria-label={`${p.name}에서 새 대화`}>
+                      <button onClick={() => onNewChatInProject(p.id)} className="sidebar-item-delete tip" aria-label={`${p.name}에서 새 대화`}>
                         <Plus style={{ width: 14, height: 14 }} />
                       </button>
                       <button onClick={() => onEditProject(p)} className="sidebar-item-delete tip" aria-label={`${p.name} 설정`}>
