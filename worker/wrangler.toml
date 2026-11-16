@@ -7,9 +7,18 @@ compatibility_date = "2026-10-01"
 name = "GENERATION"
 class_name = "Generation"
 
+[[durable_objects.bindings]]
+name = "PUSH"
+class_name = "PushRegistry"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Generation"]
+
+# v2: 웹 푸시 구독 목록(사용자별)
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PushRegistry"]
 
 [vars]
 # 접속을 허용할 웹 앱 주소(쉼표로 구분).

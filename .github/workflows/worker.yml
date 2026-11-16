@@ -19,6 +19,7 @@ jobs:
     env:
       # 단계 조건(if)에서 비밀값 유무를 보려면 작업 수준 env 로 꺼내 둬야 한다.
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      VAPID_JWK: ${{ secrets.VAPID_JWK }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +48,16 @@ jobs:
         working-directory: worker
         if: ${{ env.GOOGLE_CLIENT_SECRET != '' }}
         run: printf '%s' "$GOOGLE_CLIENT_SECRET" | npx wrangler secret put GOOGLE_CLIENT_SECRET
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      # 웹 푸시(앱을 닫아도 답변 완료 알림)용 VAPID 개인키. 레포 Secret VAPID_JWK 가 있을 때만 넣는다.
+      # 만들기: node worker/scripts/vapid.mjs → 출력한 한 줄을 Secret 에 넣는다. 없으면 푸시만 꺼지고 나머지는 그대로 동작.
+      - name: Set VAPID key
+        working-directory: worker
+        if: ${{ env.VAPID_JWK != '' }}
+        run: printf '%s' "$VAPID_JWK" | npx wrangler secret put VAPID_JWK
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}

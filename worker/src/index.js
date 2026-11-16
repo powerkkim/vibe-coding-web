@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
+import { sendPush, vapidKeys } from './webpush.js'
 
 /**
  * 응답 생성 중계 API (Cloudflare Worker + Durable Object)
@@ -6,6 +7,7 @@ import { DurableObject } from 'cloudflare:workers'
  * POST   /api/generations/:id          본문 = Anthropic Messages 요청(stream: true). 응답 = Anthropic SSE 그대로
  * GET    /api/generations/:id?offset=N  N 바이트 이후의 SSE 를 끝까지(생성 중이면 생성이 끝날 때까지) 흘려준다 | 404
  * DELETE /api/generations/:id          진행 중인 생성을 멈춘다
+ * PATCH  /api/generations/:id          앱이 결과를 끝까지 받았다(ack). 생성이 끝나고 ack 가 없으면 푸시로 알린다
  * 생성은 Durable Object(Generation)가 Anthropic 에 요청하고 원문을 쌓아 두므로, 브라우저가 끊겨도 끝까지 받는다.
  * 대화 저장은 앱이 구글 드라이브에 한다(이 서버는 대화를 저장하지 않는다). 쌓인 원문은 하루 뒤 지운다.
  *
@@ -13,6 +15,13 @@ import { DurableObject } from 'cloudflare:workers'
  * POST   /api/auth/google/refresh       { refresh } → 암호화한 갱신 토큰으로 새 액세스 토큰(1시간)을 받는다
  *   드라이브 연결을 1시간마다 다시 하지 않게 하는 용도. 갱신 토큰은 서버만 풀 수 있게 암호화해 앱(브라우저)에만 두고,
  *   서버는 아무것도 저장하지 않는다. 필요한 설정: GOOGLE_CLIENT_ID(변수), GOOGLE_CLIENT_SECRET(비밀).
+ *
+ * GET    /api/push/key                 → { publicKey } 웹 푸시(VAPID) 공개키. 설정 안 됐으면 501
+ * POST   /api/push/subscribe           { subscription } 이 기기의 푸시 구독을 등록한다(사용자 = API 키 해시)
+ * POST   /api/push/unsubscribe         { endpoint } 구독을 지운다
+ *   앱이 꺼져 있을 때 답변 완료·오류를 알리는 용도. 생성 요청에 X-Vibe-Notify(대화 id·제목)가 있으면, 생성이 끝난 뒤
+ *   앱의 ack(PATCH)가 잠시 안에 오지 않을 때만 그 사용자의 모든 기기로 푸시를 보낸다(앱이 받았으면 앱이 직접 알린다).
+ *   구독(푸시 주소·암호화 공개키)만 PushRegistry 에 저장한다. 필요한 설정: VAPID_JWK(비밀).
  *
  * 모든 API 는 허용한 앱 주소(ALLOWED_ORIGINS)에서 온 요청만 받는다(아니면 403).
  * 인증: Authorization: Bearer <Anthropic API 키>. Anthropic 이 받아 주는 키면 통과한다. 키 원문은 저장하지 않는다.
@@ -76,6 +85,9 @@ export class Generation extends DurableObject {
     this.pendingBytes = 0
     this.subscribers = new Set()
     this.controller = null
+    // 끝난 이유를 알아내려고 마지막 두 조각만 들고 있는다(전체를 디코딩하지 않는다).
+    this.tail = [new Uint8Array(0), new Uint8Array(0)]
+    this.userStopped = false
   }
 
   meta(k) {
@@ -92,6 +104,10 @@ export class Generation extends DurableObject {
       this.controller?.abort()
       return new Response(null, { status: 204 })
     }
+    if (request.method === 'PATCH') {
+      if (this.meta('started')) this.setMeta('acked', 1)
+      return new Response(null, { status: 204 })
+    }
     if (!this.meta('started')) return new Response(null, { status: 404 })
     const offset = Number(new URL(request.url).searchParams.get('offset') ?? 0)
     if (!Number.isInteger(offset) || offset < 0) return new Response(null, { status: 400 })
@@ -100,6 +116,8 @@ export class Generation extends DurableObject {
 
   async start(request) {
     if (this.meta('started')) return new Response(null, { status: 409 })
+    const user = request.headers.get('x-vibe-user')
+    const notify = request.headers.get('x-vibe-notify')
     // 응답 헤더를 기다리는 중에도 DELETE 로 멈출 수 있게 먼저 둔다.
     this.controller = new AbortController()
     const headers = { 'x-api-key': request.headers.get('x-api-key'), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
@@ -118,6 +136,7 @@ export class Generation extends DurableObject {
       return new Response(res.body, { status: res.status, headers: { 'content-type': res.headers.get('content-type') ?? 'application/json' } })
     }
     this.setMeta('started', Date.now())
+    if (user && notify) { this.setMeta('user', user); this.setMeta('notify', notify) }
     this.pump(res.body)
     return this.stream(0)
   }
@@ -132,7 +151,8 @@ export class Generation extends DurableObject {
         this.append(value)
       }
     } catch (e) {
-      this.append(errorEvent(this.controller.signal.aborted ? '생성을 중지했습니다' : `생성 중 연결이 끊겼습니다: ${e.message}`))
+      this.userStopped = this.controller.signal.aborted
+      this.append(errorEvent(this.userStopped ? '생성을 중지했습니다' : `생성 중 연결이 끊겼습니다: ${e.message}`))
     }
     this.finish()
   }
@@ -140,6 +160,7 @@ export class Generation extends DurableObject {
   append(bytes) {
     this.pending.push(bytes)
     this.pendingBytes += bytes.length
+    this.tail = [this.tail[1], bytes]
     for (const writer of this.subscribers) writer.write(bytes).catch(() => this.subscribers.delete(writer))
     if (this.pendingBytes >= FLUSH_BYTES) this.flush()
   }
@@ -164,6 +185,30 @@ export class Generation extends DurableObject {
     for (const writer of this.subscribers) writer.close().catch(() => {})
     this.subscribers.clear()
     this.ctx.storage.setAlarm(Date.now() + KEEP_MS)
+    this.notifyIfAway().catch((e) => console.error('notify', e))
+  }
+
+  /** 앱이 결과를 받았다는 ack 가 잠시 안에 오지 않으면 푸시로 알린다. */
+  async notifyIfAway() {
+    const user = this.meta('user')
+    const notify = this.meta('notify')
+    if (!user || !notify || this.userStopped || !this.env.PUSH) return
+    for (let waited = 0; waited < NOTIFY_WAIT_MS; waited += 500) {
+      if (this.meta('acked')) return
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    if (this.meta('acked')) return
+    let info
+    try { info = JSON.parse(decodeURIComponent(notify)) } catch { return }
+    const text = new TextDecoder().decode(new Uint8Array([...this.tail[0], ...this.tail[1]]))
+    const stops = [...text.matchAll(/"stop_reason":"(\w+)"/g)]
+    const stop = stops.length ? stops[stops.length - 1][1] : undefined
+    const failed = /event: error/.test(text)
+    const title = failed ? '답변 생성 중 오류가 났어요' : stop === 'tool_use' || stop === 'pause_turn' ? '답변이 중간에 멈췄어요' : '답변이 완료됐어요'
+    const chatTitle = String(info.title ?? '').slice(0, 80)
+    const body = stop === 'tool_use' || stop === 'pause_turn' ? `${chatTitle} · 앱을 열어 확인해 주세요` : chatTitle
+    const registry = this.env.PUSH.get(this.env.PUSH.idFromName(user))
+    await registry.fetch('https://push/send', { method: 'POST', body: JSON.stringify({ title, body, chatId: String(info.chatId ?? ''), failed }) })
   }
 
   /** offset 바이트 이후를 흘려준다. 쌓인 것 → 아직 쌓지 않은 것 → 이후 실시간 순서라 빠지거나 겹치는 바이트가 없다. */
@@ -189,6 +234,66 @@ export class Generation extends DurableObject {
   async alarm() {
     await this.ctx.storage.deleteAll()
   }
+}
+
+// 생성이 끝난 뒤 앱의 ack 를 기다리는 시간. 넘으면 앱이 받지 못한 것으로 보고 푸시한다.
+const NOTIFY_WAIT_MS = 8_000
+// 사용자 1명이 등록할 수 있는 기기(구독) 수. 넘으면 오래된 것부터 지운다.
+const MAX_SUBSCRIPTIONS = 10
+const PUSH_SUBJECT = 'https://powerkkim.github.io/vibe-coding-web/'
+
+/** 사용자(API 키 해시) 1명의 푸시 구독 목록. 이름 = 사용자 해시. */
+export class PushRegistry extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env)
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS sub (endpoint TEXT PRIMARY KEY, json TEXT, updated INTEGER)')
+  }
+
+  async fetch(request) {
+    const { pathname } = new URL(request.url)
+    const input = await request.json().catch(() => ({}))
+    const sql = this.ctx.storage.sql
+    if (pathname === '/subscribe') {
+      sql.exec('INSERT OR REPLACE INTO sub VALUES (?, ?, ?)', input.endpoint, JSON.stringify(input), Date.now())
+      sql.exec('DELETE FROM sub WHERE endpoint NOT IN (SELECT endpoint FROM sub ORDER BY updated DESC LIMIT ?)', MAX_SUBSCRIPTIONS)
+      return new Response(null, { status: 204 })
+    }
+    if (pathname === '/unsubscribe') {
+      sql.exec('DELETE FROM sub WHERE endpoint = ?', String(input.endpoint ?? ''))
+      return new Response(null, { status: 204 })
+    }
+    if (pathname === '/send') {
+      const keys = vapidKeys(this.env)
+      if (!keys) return new Response(null, { status: 501 })
+      const subs = sql.exec('SELECT json FROM sub').toArray().map((r) => JSON.parse(r.json))
+      const payload = JSON.stringify({ title: input.title, body: input.body, chatId: input.chatId, failed: !!input.failed })
+      const results = await Promise.all(subs.map((s) => sendPush(s, payload, keys, this.env.VAPID_SUBJECT || PUSH_SUBJECT)))
+      results.forEach((r, i) => { if (r === 'gone') sql.exec('DELETE FROM sub WHERE endpoint = ?', subs[i].endpoint) })
+      return Response.json({ sent: results.filter((r) => r === 'ok').length, total: subs.length })
+    }
+    return new Response(null, { status: 404 })
+  }
+}
+
+/** 브라우저 PushSubscription.toJSON() 형식인지 확인한다(https 푸시 주소 + p256dh·auth 키). */
+function validSubscription(s) {
+  try {
+    return !!s && typeof s.endpoint === 'string' && s.endpoint.length < 1000 && new URL(s.endpoint).protocol === 'https:' &&
+      typeof s.keys?.p256dh === 'string' && typeof s.keys?.auth === 'string' && s.keys.p256dh.length < 200 && s.keys.auth.length < 100
+  } catch { return false }
+}
+
+async function handlePush(request, env, user, action) {
+  if (request.method !== 'POST') return new Response(null, { status: 405 })
+  if (!vapidKeys(env) || !env.PUSH) return Response.json({ error: 'not_configured' }, { status: 501 })
+  const input = await request.json().catch(() => ({}))
+  const registry = env.PUSH.get(env.PUSH.idFromName(user))
+  if (action === 'subscribe') {
+    const s = input.subscription
+    if (!validSubscription(s)) return Response.json({ error: 'bad_request' }, { status: 400 })
+    return registry.fetch('https://push/subscribe', { method: 'POST', body: JSON.stringify({ endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth } }) })
+  }
+  return registry.fetch('https://push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: String(input.endpoint ?? '') }) })
 }
 
 // ── 구글 드라이브 로그인 유지(갱신 토큰) ───────────────────────────
@@ -257,17 +362,29 @@ async function handle(request, env) {
   if (!isAllowedOrigin(request.headers.get('Origin'), env)) return new Response(null, { status: 403 })
   const auth = pathname.match(/^\/api\/auth\/google\/(exchange|refresh)$/)
   if (auth) return handleGoogleAuth(request, env, auth[1])
+  if (pathname === '/api/push/key') {
+    const keys = vapidKeys(env)
+    return keys && env.PUSH ? Response.json({ publicKey: keys.publicKey }) : Response.json({ error: 'not_configured' }, { status: 501 })
+  }
   const user = await authenticate(request)
   if (!user) return new Response(null, { status: 401 })
+  const push = pathname.match(/^\/api\/push\/(subscribe|unsubscribe)$/)
+  if (push) return handlePush(request, env, user, push[1])
 
   const generation = pathname.match(/^\/api\/generations\/([^/]+)$/)
   if (generation) {
     const id = decodeURIComponent(generation[1])
     if (!ID_PATTERN.test(id)) return new Response(null, { status: 400 })
-    if (!['GET', 'POST', 'DELETE'].includes(request.method)) return new Response(null, { status: 405 })
+    if (!['GET', 'POST', 'DELETE', 'PATCH'].includes(request.method)) return new Response(null, { status: 405 })
     const headers = new Headers({ 'x-api-key': request.headers.get('Authorization').replace(/^Bearer /, '') })
     const beta = request.headers.get('anthropic-beta')
     if (beta) headers.set('anthropic-beta', beta)
+    // 앱이 꺼져 있을 때 끝나면 푸시로 알리기 위한 정보(대화 id·제목, URL 인코딩한 JSON). 길이를 제한한다.
+    const notify = request.headers.get('x-vibe-notify')
+    if (request.method === 'POST' && notify && notify.length <= 1000) {
+      headers.set('x-vibe-notify', notify)
+      headers.set('x-vibe-user', user)
+    }
     const stub = env.GENERATION.get(env.GENERATION.idFromName(`${user}:${id}`))
     return stub.fetch(new Request(request.url, { method: request.method, headers, body: request.body }))
   }
@@ -281,8 +398,8 @@ export default {
     const cors = {}
     if (isAllowedOrigin(origin, env)) {
       cors['Access-Control-Allow-Origin'] = origin
-      cors['Access-Control-Allow-Headers'] = 'Authorization, Content-Type, Anthropic-Beta'
-      cors['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS'
+      cors['Access-Control-Allow-Headers'] = 'Authorization, Content-Type, Anthropic-Beta, X-Vibe-Notify'
+      cors['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, PATCH, OPTIONS'
       cors['Vary'] = 'Origin'
       // 사전 확인(OPTIONS) 결과를 하루 동안 재사용하게 해 요청마다 왕복 한 번을 줄인다. 브라우저마다 상한이 있다(Chrome 2시간).
       cors['Access-Control-Max-Age'] = '86400'

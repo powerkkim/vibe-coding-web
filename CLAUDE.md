@@ -1,6 +1,6 @@
 # CLAUDE.md — vibe-coding-web 작업 안내
 
-Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-14 (앱 v0.5.0 기준).
+Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-16 (앱 v0.6.0 기준).
 
 ## 프로젝트
 
@@ -39,10 +39,14 @@ src/
     github.ts             GitHub 가져오기·커밋·푸시·Pages 배포
     previewSandbox.ts     미리보기 격리(sandbox 설정, 저장소 대체 코드, 격리된 새 탭)
     notify.ts             답변 완료 시스템 알림(켜기·끄기, 서비스워커 알림)
+    push.ts               웹 푸시(앱을 닫아도 오는 알림): 구독 등록·해제, 생성 요청의 X-Vibe-Notify 헤더
+    browserExt.ts         크롬 확장과 통신, browser 도구 정의·실행(사이트 허용·위험 동작 확인)
     memoryStore.ts, usage.ts, localStore.ts …
   releaseNote.ts          사이드바 아래 한 줄 공지
-public/sw.js              서비스워커: PWA 앱 화면 캐시, 알림 클릭 처리
-worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object) + 구글 로그인 유지
+public/sw.js              서비스워커: PWA 앱 화면 캐시, 알림 클릭 처리, 푸시 받기
+worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object) + 구글 로그인 유지 + 푸시 구독(PushRegistry)
+worker/src/webpush.js     웹 푸시 암호화(RFC 8291)·VAPID 서명. 키 만들기: node worker/scripts/vapid.mjs
+extension/                크롬 확장 "Vibe Coding 브라우저 도우미"(MV3, CDP). 배포 때 zip 으로 Pages 에 함께 올라간다
 .github/workflows/        deploy.yml(Pages), worker.yml(Worker)
 ```
 
@@ -52,6 +56,20 @@ worker/src/index.js       Cloudflare Worker: 응답 생성 중계(Durable Object
 - 생성 코드에서는 `setMessages`·`setProjectFiles` 를 직접 부르지 않고 `runSetMessages(run, …)`·`runSetFiles(run, …)` 를 쓴다. 화면에 떠 있는 대화(`isFg(run)`)일 때만 화면에 반영된다. 도구도 `run` 을 받아 그 대화의 파일에 적용한다.
 - 화면의 대화에서 끝나면 저장 effect 가 저장하고, 뒤에서 끝나면 `saveRun` 이 저장한다. 저장은 모두 `persistChat`(대화별 순서 보장)을 거친다.
 - 새 화면 상태를 추가할 때: 생성 중 바뀌는 값이면 Run 에 두고 `attachRun`(생성 중인 대화로 돌아올 때)에서 화면에 붙인다.
+
+## 웹 푸시 (v0.6.0)
+
+- 생성 요청마다 `X-Vibe-Notify`(대화 id·제목)를 보낸다. 앱은 결과를 끝까지 받으면 `PATCH /api/generations/:id`(ack)를 보낸다.
+- 생성이 끝나고 8초 안에 ack 가 없으면(앱이 꺼짐·멈춤) Worker 가 그 API 키로 등록된 모든 기기에 푸시한다. 사용자가 중지한 생성은 보내지 않는다.
+- 필요: 레포 Secret `VAPID_JWK`. 없으면 푸시만 꺼지고 앱 안 알림은 그대로. 키를 바꾸면 각 기기에서 알림을 다시 켜야 한다.
+
+## 브라우저 조작 (v0.6.0)
+
+- 확장 ID 는 `extension/manifest.json` 의 `key` 로 고정(`abmofglkkjkkeghdpgipiakpkcahcbhb`). key 를 바꾸면 앱의 `EXTENSION_ID` 도 바꿔야 한다.
+- 확장은 자기가 만든 "Vibe" 탭 그룹 안의 탭만 조작한다. 앱 주소(`externally_connectable`)에서 온 메시지만 받는다.
+- 처음 여는 사이트·위험해 보이는 동작의 확인은 앱이 받는다(`browserExt.ts` 의 `DANGER_RE`, 모델의 `needs_confirm`).
+- 확장을 고치면 `extension/manifest.json` 의 `version` 을 올리고, 앱이 새 기능을 필요로 하면 `MIN_EXTENSION_VERSION` 도 올린다.
+- 대화별 켜짐(`vibe_browser_chats`)·허용 사이트(`vibe_browser_sites`)는 localStorage 에만 둔다(드라이브 저장 형식 변경 없음).
 
 ## 저장 위치
 

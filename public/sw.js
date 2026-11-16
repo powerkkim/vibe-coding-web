@@ -66,7 +66,22 @@ self.addEventListener('notificationclick', event => {
       await win.focus().catch(() => {})
       if (chatId) win.postMessage({ type: 'OPEN_CHAT', chatId })
     } else {
-      await self.clients.openWindow(BASE)
+      // 앱이 꺼져 있으면 그 대화를 열도록 주소에 대화 id 를 붙인다(앱이 읽고 지운다).
+      await self.clients.openWindow(chatId ? `${BASE}?chat=${encodeURIComponent(chatId)}` : BASE)
     }
   })())
+})
+
+// 웹 푸시: 앱이 꺼져 있을 때 서버(Worker)가 답변 완료·오류를 알린다. 내용은 서버가 이 기기의 키로 암호화해 보낸다.
+// 앱이 열려 있으면 서버가 보내지 않는다(앱이 직접 알린다). 푸시를 받으면 반드시 알림을 띄워야 한다(브라우저 규칙).
+self.addEventListener('push', event => {
+  let data = {}
+  try { data = event.data ? event.data.json() : {} } catch { /* 형식이 다르면 기본 문구 */ }
+  const chatId = typeof data.chatId === 'string' ? data.chatId : ''
+  event.waitUntil(self.registration.showNotification(data.title || '답변이 완료됐어요', {
+    body: data.body || '',
+    tag: chatId ? `vibe-${chatId}` : 'vibe',
+    icon: BASE + 'icons/icon-192.png',
+    data: { chatId },
+  }))
 })
