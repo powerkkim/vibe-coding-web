@@ -774,3 +774,24 @@
 /* 사이드바 아래: 버전과 한 줄 공지, 알림 설정 */
 .sidebar-notice { padding: 8px 12px; border-top: 1px solid var(--border); font-size: var(--fs-xs); color: var(--txt-3); display: flex; flex-direction: column; gap: 4px; }
 .sidebar-notice b { color: var(--txt-2); font-weight: 500; }
+
+/* 브라우저 도구 켜기 버튼(입력창) */
+.browser-btn { display: inline-flex; align-items: center; gap: 4px; }
+.browser-btn.on { background: var(--accent); color: var(--on-accent); }
+.browser-btn.on:hover { color: var(--on-accent); background: var(--accent-h); }
+.sidebar-ext-link { background: none; border: none; padding: 0; cursor: pointer; color: var(--txt-3); font-size: inherit; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+.sidebar-ext-link:hover { color: var(--txt); }
+
+/* 브라우저 작업 확인 바(입력창 바로 위) */
+.confirm-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; padding: 10px 12px 10px 14px; background: var(--bg-panel); color: var(--txt); border: 1.5px solid #EF9F27; border-radius: var(--radius-lg); box-shadow: 0 2px 12px rgba(239,159,39,0.18); font-size: var(--fs-sm); animation: confirm-in .18s ease-out; }
+@keyframes confirm-in { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+.confirm-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.confirm-title { font-weight: 600; }
+.confirm-chat { font-size: var(--fs-xs); color: var(--txt-3); }
+.confirm-detail { font-size: var(--fs-xs); white-space: pre-wrap; color: var(--txt-2); word-break: break-all; }
+.confirm-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.confirm-allow { height: 30px; padding: 0 14px; border-radius: 8px; border: none; background: var(--accent); color: var(--on-accent); font-weight: 600; cursor: pointer; }
+.confirm-allow:hover { background: var(--accent-h); }
+.confirm-deny { height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--txt); cursor: pointer; }
+.confirm-deny:hover { background: var(--bg-hover); }
+.confirm-more { font-weight: 400; font-size: var(--fs-xs); color: var(--txt-3); }

@@ -1,11 +1,12 @@
 ﻿import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import type { ReactNode } from 'react'
 import { ArrowUp, ChevronDown, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
 import AnswerView from './AnswerView'
 import type { CodeMode, Message, MessageImage, TokenUsage } from '../services/ai'
 import type { PickerDoc } from '../services/driveExport'
 import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
 import { formatUsd, remainingBalance } from '../services/usage'
-import { GoogleDrive } from '../icons'
+import { GoogleDrive, Globe } from '../icons'
 import { downloadOutputFile } from '../services/ai'
 import type { Balance } from '../services/usage'
 import type { UsageTotals } from '../services/usage'
@@ -42,6 +43,10 @@ interface Props {
   projectName?: string
   // 코딩 모드(수동: 코드를 만들기 전에 확인 / 자동: 스스로 판단)
   codeMode: CodeMode
+  // 크롬 확장이 연결돼 있을 때만: 이 대화에서 browser 도구를 켤지(기본 끔)
+  browser?: { on: boolean; onToggle: (on: boolean) => void; outdated?: boolean }
+  // 입력창 바로 위에 띄우는 알림(브라우저 작업 확인 바 등)
+  notice?: ReactNode
   // 컨텍스트 게이지: 지금 대화가 차지한 토큰과 기준(권장 한도). 새 대화로 갈아타기 버튼에 onNewChat 을 쓴다.
   contextTokens: number
   /** 지금 열린 대화(새 대화는 'new'). 바뀌면 애니메이션 없이 바로 맨 아래를 보여 준다. */
@@ -160,7 +165,7 @@ export function OutputFiles({ ids, onSaveToDrive }: { ids: string[]; onSaveToDri
   )
 }
 
-export default function ChatPanel({ chatKey, contextTokens, contextBudget, priceJumpAt, onNewChat, codeMode, onCodeModeChange, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
+export default function ChatPanel({ chatKey, contextTokens, contextBudget, priceJumpAt, onNewChat, codeMode, onCodeModeChange, browser, notice, projectName, onOpenProject, messages, onSend, onStop, onRetry, onContinue, onSaveOutputToDrive, onPickDriveFile, attachError, isLoading, hasApiKey, width, tokenUsage, lastCost, usageTotals, onResetUsage, balance, onBalanceChange, activeAnswerIndex, onOpenAnswer, onRestore }: Props) {
   // 마지막 답변은 현재 버전이라 되돌리기 버튼을 두지 않는다.
   const lastAnswerIndex = messages.map((m) => m.role).lastIndexOf('assistant')
   const [input, setInput] = useState('')
@@ -287,6 +292,7 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
   // 입력창 묶음. 대화가 비어 있으면 화면 가운데에, 있으면 아래에 둔다.
   const composer = (
       <div className="flex-shrink-0 px-3 pb-3 pt-2 w-full max-w-[760px] mx-auto">
+        {notice}
         {!hasApiKey && (
           <div className="flex items-center gap-2 px-3 py-2 mb-2"
             style={{ background: 'var(--err-bg)', border: '1px solid var(--err-bd)', borderRadius: 'var(--radius-md)', color: 'var(--err)', fontSize: 'var(--fs-sm)' }}>
@@ -379,6 +385,14 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
             </span>
             <span className="flex items-center gap-2">
             {contextTokens > 0 && <ContextGauge used={contextTokens} budget={contextBudget} priceJumpAt={priceJumpAt} onNewChat={onNewChat} disabled={isLoading} />}
+            {browser && (
+              <button type="button" className={`code-mode-btn browser-btn${browser.on ? ' on' : ''}`} aria-pressed={browser.on}
+                title={browser.on ? '이 대화에서 챗봇이 크롬 "Vibe" 탭을 조작할 수 있어요. 누르면 꺼요' : '누르면 이 대화에서 챗봇이 크롬 탭을 열고 조작할 수 있어요'}
+                onClick={() => browser.onToggle(!browser.on)}>
+                <Globe aria-hidden="true" style={{ width: 14, height: 14 }} />
+                <span className="hidden md:inline">브라우저{browser.outdated ? ' ⚠' : ''}</span>
+              </button>
+            )}
             <CodeModeMenu mode={codeMode} onChange={onCodeModeChange} />
             <button onClick={isLoading && !interrupting ? onStop : submit} disabled={!isLoading && !canSend}
               aria-label={interrupting ? '지금 답변을 멈추고 보내기' : isLoading ? '생성 중지' : '전송'}

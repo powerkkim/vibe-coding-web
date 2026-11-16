@@ -3,7 +3,7 @@ import type { HugeiconsIconProps, IconSvgElement } from '@hugeicons/react'
 import {
   AlertCircleIcon, ArrowDown01Icon, ArrowLeft01Icon, ArrowRight01Icon, ArrowUp02Icon, Cancel01Icon, Copy01Icon,
   Delete02Icon, Download04Icon, DragDropVerticalIcon, File02Icon, FileCodeIcon, FileScriptIcon, Folder01Icon,
-  GitForkIcon, GoogleDriveIcon, HistoryIcon, ImageAdd02Icon, Key01Icon, LinkSquare02Icon, Loading03Icon, Message01Icon, Moon02Icon,
+  GitForkIcon, Globe02Icon, GoogleDriveIcon, HistoryIcon, ImageAdd02Icon, Key01Icon, LinkSquare02Icon, Loading03Icon, Message01Icon, Moon02Icon,
   MoreHorizontalIcon, PaintBoardIcon, PencilEdit02Icon, PlusSignIcon, RefreshIcon, SidebarLeftIcon, SlidersHorizontalIcon, SourceCodeIcon,
   StopIcon, Sun03Icon, Tick02Icon, ViewIcon,
 } from '@hugeicons/core-free-icons'
@@ -34,6 +34,7 @@ export const FileText = icon(File02Icon)
 export const FolderGit2 = icon(Folder01Icon)
 export const GitFork = icon(GitForkIcon)
 export const GoogleDrive = icon(GoogleDriveIcon)
+export const Globe = icon(Globe02Icon)
 export const SlidersHorizontal = icon(SlidersHorizontalIcon)
 export const GripVertical = icon(DragDropVerticalIcon)
 export const History = icon(HistoryIcon)

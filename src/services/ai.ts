@@ -4,7 +4,7 @@ import { SERVER_URL } from './chatStore'
  * 응답 생성 중계 서버(worker/). 있으면 요청마다 서버가 대신 Anthropic 에 요청하고 원문을 쌓아 둬서,
  * 폰 앱이 백그라운드로 가거나 브라우저를 닫아도 끝까지 받고 다시 열면 이어 받는다. 대화 저장은 이와 별개(드라이브).
  */
-const GEN_URL: string | undefined = (import.meta.env.VITE_GENERATION_SERVER_URL as string | undefined) || SERVER_URL
+export const GEN_URL: string | undefined = (import.meta.env.VITE_GENERATION_SERVER_URL as string | undefined) || SERVER_URL
 export const USE_GENERATION_SERVER = !!GEN_URL
 // 생성 id → 지금 진행 중인 라운드 id(도구 왕복마다 요청이 하나씩 늘어난다). 중지할 때 이 라운드를 멈춘다.
 const activeRound = new Map<string, string>()
@@ -150,7 +150,8 @@ const WEB_FETCH_MAX_USES = 5
 const MAX_ROUNDS = 30
 
 /** 앱이 실행하는 도구(메모리·텍스트 에디터)의 결과 */
-export interface ClientToolResult { content: string; isError?: boolean }
+/** content 는 글 또는 tool_result 블록 배열(브라우저 도구의 스크린샷처럼 이미지를 돌려줄 때). */
+export interface ClientToolResult { content: string | Record<string, unknown>[]; isError?: boolean }
 
 /** 스트림 부가 이벤트 */
 export interface StreamHooks {
@@ -172,6 +173,8 @@ export interface StreamHooks {
   codeMode?: CodeMode
   // 현재 파일을 어떻게 보낼지. full: 코드 파일 전체(큰 파일·imports/ 데이터는 요약), list: 목록만(필요하면 project_files 로 읽는다)
   filesMode?: FilesMode
+  // 앱이 꺼져 있을 때 끝나면 서버가 푸시로 알리기 위한 정보(push.notifyHeader). 서버 방식에서만 보낸다.
+  notify?: string
 }
 
 /** 어드바이저 호출 토큰(조언 모델 단가로 과금) */
@@ -553,6 +556,7 @@ export async function* streamCode(
   const headers: Record<string, string> = {
     ...(GEN_URL ? authHeader(apiKey) : directHeaders(apiKey)),
     'Content-Type': 'application/json',
+    ...(GEN_URL && hooks.notify ? { 'X-Vibe-Notify': hooks.notify } : {}),
     ...((useFallback || betas.length) ? { 'anthropic-beta': [...(useFallback ? ['server-side-fallback-2026-07-01'] : []), ...betas].join(',') } : {}),
   }
 
@@ -567,7 +571,7 @@ export async function* streamCode(
     const extra: Turn[] = []
     let container: string | undefined
     for (let round = 0; ; round++) {
-      const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, ...withTailCache(extra)], ...(container ? { container } : {}) })
+      const reqBody = round === 0 ? body : JSON.stringify({ ...request, messages: [...baseMessages, ...withTailCache(pruneImages(extra))], ...(container ? { container } : {}) })
       const rid = roundId(generationId, round)
       activeRound.set(generationId, rid)
       let direct: Response | null = null
@@ -610,6 +614,26 @@ export async function* streamCode(
     }
   }
 
+}
+
+// 도구 결과에 담긴 이미지(브라우저 스크린샷)는 최근 것만 다시 보낸다. 왕복마다 쌓이면 입력 토큰이 크게 는다.
+const KEEP_TOOL_IMAGES = 2
+function pruneImages(extra: { role: string; content: Record<string, unknown>[] }[]) {
+  let seen = 0
+  const out = extra.map((m) => ({ ...m, content: [...m.content] }))
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = out[i]
+    if (m.role !== 'user') continue
+    for (let j = m.content.length - 1; j >= 0; j--) {
+      const b = m.content[j]
+      if (b.type !== 'tool_result' || !Array.isArray(b.content)) continue
+      const blocks = b.content as Record<string, unknown>[]
+      if (!blocks.some((c) => c.type === 'image')) continue
+      if (++seen <= KEEP_TOOL_IMAGES) continue
+      m.content[j] = { ...b, content: blocks.map((c) => (c.type === 'image' ? { type: 'text', text: '[이전 스크린샷은 생략함]' } : c)) }
+    }
+  }
+  return out
 }
 
 /**
@@ -682,6 +706,12 @@ async function* resumeRounds(apiKey: string, generationId: string, onUsage?: (us
 
 // eslint-disable-next-line require-yield
 async function* failed(err: Error): AsyncGenerator<string, void, unknown> { throw err }
+
+/** 생성 결과를 앱이 받았음을 서버에 알린다(푸시 알림 생략용). 실패해도 무시한다(알림이 한 번 더 올 뿐). */
+function ackGeneration(apiKey: string, id: string) {
+  if (!GEN_URL) return
+  fetch(generationUrl(id), { method: 'PATCH', headers: authHeader(apiKey), keepalive: true }).then((r) => r.body?.cancel()).catch(() => {})
+}
 
 /** 서버에서 진행 중인 생성을 멈춘다. 이미 끝났으면 아무 일도 하지 않는다. */
 export async function cancelGeneration(apiKey: string, generationId: string): Promise<void> {
@@ -850,8 +880,13 @@ async function* readGeneration(
             if (Array.isArray(event.usage?.iterations)) advisor = advisorUsage(event.usage.iterations)
             stopReason = event.delta.stop_reason ?? stopReason
             stopExplanation = event.delta.stop_details?.explanation ?? stopExplanation
-          } else if (event.type === 'error') throw new GenerationError(event.error?.message ?? '생성 중 오류가 발생했습니다')
+          } else if (event.type === 'error') {
+            if (canResume) ackGeneration(apiKey, id)
+            throw new GenerationError(event.error?.message ?? '생성 중 오류가 발생했습니다')
+          }
           else if (event.type === 'message_stop') {
+            // 서버에 '앱이 끝까지 받았다'고 알린다. 받지 않은 채 끝나면(앱이 꺼짐) 서버가 푸시로 알린다.
+            if (canResume) ackGeneration(apiKey, id)
             reportUsage(usage, stopReason, stopExplanation, onUsage, speed === 'fast', webSearches, advisor)
             hooks.onDone?.(blocks.filter(Boolean), stopReason, container)
             return

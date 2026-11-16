@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Vibe Coding 브라우저 도우미",
+  "version": "0.1.0",
+  "description": "Vibe Coding 챗봇이 이 크롬의 \"Vibe\" 탭 그룹 안에서 페이지를 열고 읽고 클릭·입력하게 해 줍니다.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3Lbeeoec9OUMtq/uQJ+2v1dlBRKgDLoZ5Fc4rNuyhM9Yq5VpfU4pSz2/X1tmEUGFdlDdX5IyyotPk8ipWngURBS6JcJg6yeV7FKV1uYExHjAUMYv2S2vxAVK+O4VWRzVottpsK0eYOu0W6SLZ7wcb8QyN2+iYrEmnn7GoePaKLyzRVJCKSBoEdVpaVd/S7EPvbo7wyDfqwECElpgSd9wXw65A/JB/G3uuQdVMZ49DcfljMCMzTaHw6EE6q2DG/HcdRi+MvC1gyffTEzxZg//XeSgZuU2nRH0m70U/tdZi/lJNpL4y20hhVxKM6VXEs7Ua52PDT/M/pPYWEc0zgv4+wIDAQAB",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "externally_connectable": {
+    "matches": [
+      "https://powerkkim.github.io/*",
+      "http://localhost:5173/*",
+      "http://localhost:4186/*"
+    ]
+  },
+  "action": {
+    "default_title": "Vibe Coding 브라우저 도우미"
+  },
+  "icons": {
+    "128": "icons/icon-128.png"
+  }
+}

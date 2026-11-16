@@ -22,7 +22,9 @@ interface Props {
   version: string
   note: string
   /** 시스템 알림 설정. 브라우저가 알림을 지원하지 않으면 없음 */
-  notify?: { on: boolean; onToggle: (on: boolean) => void }
+  notify?: { on: boolean; push?: boolean; onToggle: (on: boolean) => void }
+  // 데스크톱에서만: 크롬 확장 연결 상태(버전 또는 null)와 설치 안내 열기
+  browserExt?: { version: string | null; onOpen: () => void }
   error: string
   onSelect: (id: string) => void
   onNew: () => void
@@ -52,7 +54,7 @@ function groupLabel(updatedAt: number, todayStart: number): string {
   return '이전'
 }
 
-export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, version, note, notify, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
+export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, version, note, notify, browserExt, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
   const todayStart = new Date().setHours(0, 0, 0, 0)
   const projectIds = new Set(projects.map((p) => p.id))
   const inProject = (c: ChatSummary) => !!c.projectId && projectIds.has(c.projectId)
@@ -181,10 +183,15 @@ export default function Sidebar({ chats, activeId, loadingId, runningIds, unread
       <div className="sidebar-notice flex-shrink-0">
         <span><b>v{version}</b> · {note}</span>
         {notify && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }} title="다른 탭이나 프로그램을 보고 있을 때 답변이 끝나면 시스템 알림을 띄워요 (앱이 열려 있는 동안)">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }} title={notify.push ? '답변이 끝나면 알려요. 앱을 닫아도 이 기기로 알림이 와요' : '다른 탭이나 프로그램을 보고 있을 때 답변이 끝나면 시스템 알림을 띄워요 (앱이 열려 있는 동안)'}>
             <input type="checkbox" checked={notify.on} onChange={(e) => notify.onToggle(e.target.checked)} />
-            답변 완료 시스템 알림
+            {notify.push ? '답변 완료 알림 (앱을 닫아도)' : '답변 완료 시스템 알림'}
           </label>
+        )}
+        {browserExt && (
+          <button type="button" onClick={browserExt.onOpen} className="sidebar-ext-link">
+            {browserExt.version ? `브라우저 확장 v${browserExt.version} 연결됨` : '브라우저 확장 설치'}
+          </button>
         )}
       </div>
 

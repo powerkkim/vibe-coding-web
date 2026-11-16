@@ -28,6 +28,10 @@ import type { GithubRepo } from './services/chatStore'
 import type { ChatListItem as ChatSummary, StoredChat } from './services/chatStore'
 import { useEscapeKey } from './hooks/useEscapeKey'
 import { notifyEnabled, notifySupported, onNotificationOpen, setNotifyEnabled, showSystemNotification } from './services/notify'
+import { disablePush, enablePush, notifyHeader, pushEnabled, pushSupported, resyncPush } from './services/push'
+import { BROWSER_TOOL, browserOnForChat, detectExtension, MIN_EXTENSION_VERSION, runBrowserTool, setBrowserForChat, versionLess } from './services/browserExt'
+import type { ConfirmRequest } from './services/browserExt'
+import BrowserExtModal from './components/BrowserExtModal'
 import { RELEASE_NOTE } from './releaseNote'
 import { X } from './icons'
 import Header from './components/Header'  // 상단 헤더 (로고, 설정, API 키)
@@ -217,6 +221,18 @@ const MOBILE_QUERY = '(max-width: 767px)'
 // 채팅 패널 너비 범위: 최소 200px, 최대 화면 너비의 60%. 키보드 조절은 한 번에 20px.
 const CHAT_MIN_WIDTH = 200
 const CHAT_KEY_STEP = 20
+/** 주소의 ?chat=<id> 를 읽고 주소에서 지운다(푸시 알림으로 앱을 열었을 때). */
+function chatFromUrl(): string | null {
+  try {
+    const url = new URL(location.href)
+    const id = url.searchParams.get('chat')
+    if (!id) return null
+    url.searchParams.delete('chat')
+    history.replaceState(null, '', url.pathname + url.search + url.hash)
+    return /^[\w-]{1,64}$/.test(id) ? id : null
+  } catch { return null }
+}
+
 function clampChatWidth(width: number): number {
   return Math.max(CHAT_MIN_WIDTH, Math.min(width, window.innerWidth * 0.6))
 }
@@ -278,11 +294,50 @@ export default function App() {
     const off = onNotificationOpen((id) => selectChatRef.current(id))
     return () => { document.removeEventListener('visibilitychange', back); window.removeEventListener('focus', back); off() }
   }, [])
+  // 웹 푸시(앱을 닫아도 오는 알림): 알림을 켜면 함께 켠다. 서버에 푸시 설정이 없으면 앱이 열려 있을 때만 알린다.
+  const [pushOn, setPushOn] = useState(pushEnabled)
   const toggleNotify = async (on: boolean) => {
     const ok = await setNotifyEnabled(on)
     setNotifyOn(ok)
     if (on && !ok) setStorageError('알림이 차단돼 있어요. 브라우저 주소창의 사이트 설정에서 알림을 허용한 뒤 다시 켜 주세요')
+    if (on && ok && pushSupported()) {
+      const r = await enablePush(activeApiKeyRef.current)
+      setPushOn(r === 'on')
+      if (r === 'error') setStorageError('앱을 닫아도 오는 알림(푸시)을 켜지 못했어요. 앱이 열려 있는 동안의 알림은 켜졌어요')
+    }
+    if (!on) { await disablePush(activeApiKeyRef.current); setPushOn(false) }
   }
+  // ── 브라우저 조작(크롬 확장) ──
+  // 확장이 있으면 버전, 없으면 null. 창으로 돌아올 때마다 다시 확인한다(설치·삭제를 바로 반영).
+  const [extVersion, setExtVersion] = useState<string | null>(null)
+  const extVersionRef = useRef<string | null>(null)
+  useEffect(() => {
+    const check = () => detectExtension().then((v) => { extVersionRef.current = v; setExtVersion(v) })
+    check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [])
+  const [extModal, setExtModal] = useState(false)
+  // 화면의 대화에서 browser 도구를 켰는지(대화마다, 기본 끔). 새 대화에서 켜면 첫 전송 때 그 대화에 기록한다.
+  const [browserOn, setBrowserOnState] = useState(false)
+  const browserOnRef = useRef(false)
+  browserOnRef.current = browserOn
+  // 위험한 동작·처음 여는 사이트 확인(채팅 위 카드). 여러 대화에서 동시에 올 수 있어 줄을 세운다.
+  const [confirms, setConfirms] = useState<{ id: number; chatId: string; chatTitle: string; req: ConfirmRequest; resolve: (ok: boolean) => void }[]>([])
+  const confirmSeqRef = useRef(0)
+  const requestConfirm = (run: Run, req: ConfirmRequest) => new Promise<boolean>((resolve) => {
+    const id = ++confirmSeqRef.current
+    setConfirms((prev) => [...prev, { id, chatId: run.chatId, chatTitle: chatTitle(run.messages), req, resolve }])
+    // 크롬 창을 보고 있으면 확인 카드를 못 볼 수 있어 시스템 알림도 띄운다(알림을 켠 경우).
+    showSystemNotification(run.chatId, '브라우저 작업 확인이 필요해요', req.title, (cid) => selectChatRef.current(cid))
+    // 생성을 멈추면 거절로 처리한다.
+    run.controller.signal.addEventListener('abort', () => answerConfirm(id, false), { once: true })
+  })
+  const answerConfirm = (id: number, ok: boolean) => setConfirms((prev) => {
+    const c = prev.find((x) => x.id === id)
+    if (c) c.resolve(ok)
+    return prev.filter((x) => x.id !== id)
+  })
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null)
   const [lastCost, setLastCost] = useState(0)
   const [usageTotals, setUsageTotals] = useState(loadUsage)
@@ -473,7 +528,8 @@ export default function App() {
 
   // 새로고침해도 마지막에 열어 둔 대화를 다시 연다. 저장소를 쓸 수 있게 된 첫 시점에 한 번만 연다.
   // 아래 기억 effect 가 키를 지우기 전에 읽어 둔다.
-  const lastChatIdRef = useRef(localStorage.getItem('vibe_chat_id'))
+  // 푸시 알림을 눌러 앱이 새로 열리면 주소의 ?chat=<id> 대화를 연다(주소에서는 지운다).
+  const lastChatIdRef = useRef(chatFromUrl() ?? localStorage.getItem('vibe_chat_id'))
   useEffect(() => {
     const lastId = lastChatIdRef.current
     if (!storageReady || !lastId) return
@@ -486,6 +542,19 @@ export default function App() {
     if (chatId) localStorage.setItem('vibe_chat_id', chatId)
     else localStorage.removeItem('vibe_chat_id')
   }, [chatId])
+  // 대화를 바꾸면 그 대화의 브라우저 켜짐 상태를 불러온다. 새 대화(첫 전송 전)는 꺼진 채로 시작한다.
+  const browserChatRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = browserChatRef.current
+    browserChatRef.current = chatId
+    // 새 대화에서 켠 뒤 첫 전송으로 id 가 생긴 경우는 켜진 상태를 그대로 둔다(runGeneration 이 기록).
+    if (prev === null && chatId && browserOnRef.current) return
+    setBrowserOnState(browserOnForChat(chatId))
+  }, [chatId])
+  const toggleBrowser = (on: boolean) => {
+    setBrowserOnState(on)
+    if (chatId) setBrowserForChat(chatId, on)
+  }
 
   // 같은 대화의 저장이 겹치면(시작 시 저장 ↔ 끝난 뒤 저장) 드라이브에 파일이 둘 생기거나 옛 내용이 나중에 덮어쓸 수 있어, 대화별로 한 줄로 세운다.
   const saveQueueRef = useRef(new Map<string, Promise<unknown>>())
@@ -704,6 +773,12 @@ export default function App() {
     setActiveApiKey(key)
     localStorage.setItem('vibe_api_key_anthropic', key)
   }
+  // 푸시 구독은 API 키별로 저장된다. 앱 시작·키 변경 때 켜 둔 구독을 다시 등록한다.
+  const activeApiKeyRef = useRef(activeApiKey)
+  activeApiKeyRef.current = activeApiKey
+  useEffect(() => {
+    if (activeApiKey) resyncPush(activeApiKey).then(() => setPushOn(pushEnabled())).catch(() => {})
+  }, [activeApiKey])
 
   const handleModelChange = (nextModel: string) => {
     setActiveModel(nextModel)
@@ -898,6 +973,10 @@ export default function App() {
       setDriveModal('request')
       return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
     }
+    if (name === 'browser') {
+      if (!extVersionRef.current) return { content: 'The Vibe Coding Chrome extension is not connected anymore. Tell the user to open the app in Chrome with the extension installed.', isError: true }
+      return runBrowserTool(input, (req) => requestConfirm(run, req), (line) => handleActivity(run, line))
+    }
     if (name === 'project_files') return runProjectFiles(run, input)
     if (name === 'github') return runGithubTool(run, input)
     if (name === 'str_replace_based_edit_tool') {
@@ -1030,6 +1109,9 @@ export default function App() {
     }
     runsRef.current.set(run.chatId, run)
     syncRunning()
+    // 화면의 대화에서 브라우저를 켜 두었으면 이 대화에 기록하고 browser 도구를 싣는다(확장이 있을 때만).
+    if (isFg(run) && browserOnRef.current) setBrowserForChat(run.chatId, true)
+    const useBrowser = !!extVersionRef.current && browserOnForChat(run.chatId)
     if (isFg(run)) {
       setMessages(run.messages)
       setIsLoading(true)
@@ -1066,11 +1148,12 @@ export default function App() {
             onSource: (src) => handleSource(run, src),
             onFile: (id) => { if (!run.outputFiles.includes(id)) run.outputFiles.push(id) },
             onClientTool: (name, input) => runClientTool(run, name, input),
-            appTools: APP_TOOLS,
+            appTools: useBrowser ? [...APP_TOOLS, BROWSER_TOOL] : APP_TOOLS,
             projectContext: projectContext(projects.find((p) => p.id === run.projectId)),
             codeMode,
             // 코드를 만들거나 고치라는 메시지일 때만 파일 전체를 보내고, 일반 대화에는 목록만 보낸다.
             filesMode: isBuildRequest(history[history.length - 1]?.content ?? '') ? 'full' : 'list',
+            notify: notifyHeader(run.chatId, chatTitle(history)),
           })
       for await (const chunk of chunks) {
         run.buffer += chunk
@@ -1534,7 +1617,8 @@ export default function App() {
       unreadIds={unreadIds}
       version={__APP_VERSION__}
       note={RELEASE_NOTE}
-      notify={notifySupported() ? { on: notifyOn, onToggle: toggleNotify } : undefined}
+      notify={notifySupported() ? { on: notifyOn, push: pushOn, onToggle: toggleNotify } : undefined}
+      browserExt={isMobile ? undefined : { version: extVersion, onOpen: () => setExtModal(true) }}
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
@@ -1599,6 +1683,24 @@ export default function App() {
             attachError={attachError}
             codeMode={codeMode}
             onCodeModeChange={setCodeMode}
+            notice={confirms.length > 0 && (() => {
+              // 브라우저 작업 확인: 입력창 바로 위 가로 바. 여러 건이면 하나씩.
+              const c = confirms[0]
+              return (
+                <div key={c.id} className="confirm-bar" role="alertdialog" aria-live="assertive" aria-label="브라우저 작업 확인">
+                  <div className="confirm-text">
+                    <div className="confirm-title">{c.req.title}{confirms.length > 1 && <span className="confirm-more"> · 대기 {confirms.length - 1}건</span>}</div>
+                    {c.chatId !== chatId && <div className="confirm-chat">'{c.chatTitle}' 대화</div>}
+                    <div className="confirm-detail">{c.req.detail}</div>
+                  </div>
+                  <div className="confirm-actions">
+                    <button className="confirm-allow" onClick={() => answerConfirm(c.id, true)}>{c.req.allowLabel ?? '허용'}</button>
+                    <button className="confirm-deny" onClick={() => answerConfirm(c.id, false)}>취소</button>
+                  </div>
+                </div>
+              )
+            })()}
+            browser={extVersion && !isMobile ? { on: browserOn, onToggle: toggleBrowser, outdated: versionLess(extVersion, MIN_EXTENSION_VERSION) } : undefined}
             projectName={currentProject?.name}
             onOpenProject={() => currentProject && setProjectModal(currentProject)}
             onStop={handleStop}
@@ -1662,6 +1764,7 @@ export default function App() {
           />
         </div>
       </div>
+      {extModal && <BrowserExtModal version={extVersion} minVersion={MIN_EXTENSION_VERSION} onClose={() => setExtModal(false)} />}
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
           {toasts.map((t) => (
