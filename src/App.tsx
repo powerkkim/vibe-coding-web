@@ -1683,6 +1683,23 @@ export default function App() {
             attachError={attachError}
             codeMode={codeMode}
             onCodeModeChange={setCodeMode}
+            notice={confirms.length > 0 && (() => {
+              // 브라우저 작업 확인: 입력창 바로 위 가로 바. 여러 건이면 하나씩.
+              const c = confirms[0]
+              return (
+                <div key={c.id} className="confirm-bar" role="alertdialog" aria-live="assertive" aria-label="브라우저 작업 확인">
+                  <div className="confirm-text">
+                    <div className="confirm-title">{c.req.title}{confirms.length > 1 && <span className="confirm-more"> · 대기 {confirms.length - 1}건</span>}</div>
+                    {c.chatId !== chatId && <div className="confirm-chat">'{c.chatTitle}' 대화</div>}
+                    <div className="confirm-detail">{c.req.detail}</div>
+                  </div>
+                  <div className="confirm-actions">
+                    <button className="confirm-allow" onClick={() => answerConfirm(c.id, true)}>{c.req.allowLabel ?? '허용'}</button>
+                    <button className="confirm-deny" onClick={() => answerConfirm(c.id, false)}>취소</button>
+                  </div>
+                </div>
+              )
+            })()}
             browser={extVersion && !isMobile ? { on: browserOn, onToggle: toggleBrowser, outdated: versionLess(extVersion, MIN_EXTENSION_VERSION) } : undefined}
             projectName={currentProject?.name}
             onOpenProject={() => currentProject && setProjectModal(currentProject)}
@@ -1747,22 +1764,6 @@ export default function App() {
           />
         </div>
       </div>
-      {confirms.length > 0 && (
-        <div className="confirm-stack" role="alertdialog" aria-live="assertive" aria-label="브라우저 작업 확인">
-          {confirms.slice(0, 1).map((c) => (
-            <div key={c.id} className="confirm-card">
-              <div className="confirm-title">{c.req.title}</div>
-              {c.chatId !== chatId && <div className="confirm-chat">'{c.chatTitle}' 대화</div>}
-              <div className="confirm-detail">{c.req.detail}</div>
-              <div className="confirm-actions">
-                <button className="confirm-allow" onClick={() => answerConfirm(c.id, true)}>{c.req.allowLabel ?? '허용'}</button>
-                <button className="confirm-deny" onClick={() => answerConfirm(c.id, false)}>취소</button>
-                {confirms.length > 1 && <span className="confirm-more">대기 {confirms.length - 1}건</span>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
       {extModal && <BrowserExtModal version={extVersion} minVersion={MIN_EXTENSION_VERSION} onClose={() => setExtModal(false)} />}
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">

@@ -782,14 +782,16 @@
 .sidebar-ext-link { background: none; border: none; padding: 0; cursor: pointer; color: var(--txt-3); font-size: inherit; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
 .sidebar-ext-link:hover { color: var(--txt); }
 
-/* 브라우저 작업 확인 카드 */
-.confirm-stack { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 70; width: min(380px, calc(100vw - 24px)); }
-.confirm-card { background: var(--bg-panel); color: var(--txt); border: 2px solid #EF9F27; border-radius: var(--radius-lg); padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.18); display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); }
+/* 브라우저 작업 확인 바(입력창 바로 위) */
+.confirm-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; padding: 10px 12px 10px 14px; background: var(--bg-panel); color: var(--txt); border: 1.5px solid #EF9F27; border-radius: var(--radius-lg); box-shadow: 0 2px 12px rgba(239,159,39,0.18); font-size: var(--fs-sm); animation: confirm-in .18s ease-out; }
+@keyframes confirm-in { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+.confirm-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .confirm-title { font-weight: 600; }
 .confirm-chat { font-size: var(--fs-xs); color: var(--txt-3); }
-.confirm-detail { white-space: pre-wrap; color: var(--txt-2); word-break: break-all; }
-.confirm-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.confirm-detail { font-size: var(--fs-xs); white-space: pre-wrap; color: var(--txt-2); word-break: break-all; }
+.confirm-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .confirm-allow { height: 30px; padding: 0 14px; border-radius: 8px; border: none; background: var(--accent); color: var(--on-accent); font-weight: 600; cursor: pointer; }
 .confirm-allow:hover { background: var(--accent-h); }
-.confirm-deny { height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--txt); cursor: pointer; }
-.confirm-more { font-size: var(--fs-xs); color: var(--txt-3); }
+.confirm-deny { height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--txt); cursor: pointer; }
+.confirm-deny:hover { background: var(--bg-hover); }
+.confirm-more { font-weight: 400; font-size: var(--fs-xs); color: var(--txt-3); }
