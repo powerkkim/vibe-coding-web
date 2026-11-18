@@ -25,6 +25,8 @@ interface Props {
   notify?: { on: boolean; push?: boolean; onToggle: (on: boolean) => void }
   // 데스크톱에서만: 크롬 확장 연결 상태(버전 또는 null)와 설치 안내 열기
   browserExt?: { version: string | null; onOpen: () => void }
+  // 메모리 활용 팁 열기
+  onOpenMemoryGuide?: () => void
   error: string
   onSelect: (id: string) => void
   onNew: () => void
@@ -54,7 +56,7 @@ function groupLabel(updatedAt: number, todayStart: number): string {
   return '이전'
 }
 
-export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, version, note, notify, browserExt, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
+export default function Sidebar({ chats, activeId, loadingId, runningIds, unreadIds, version, note, notify, browserExt, onOpenMemoryGuide, error, onSelect, onNew, onDelete, onClose, drive, projects, activeProjectId, onNewProject, onEditProject, onNewChatInProject, onMoveChat }: Props) {
   const todayStart = new Date().setHours(0, 0, 0, 0)
   const projectIds = new Set(projects.map((p) => p.id))
   const inProject = (c: ChatSummary) => !!c.projectId && projectIds.has(c.projectId)
@@ -187,6 +189,9 @@ export default function Sidebar({ chats, activeId, loadingId, runningIds, unread
             <input type="checkbox" checked={notify.on} onChange={(e) => notify.onToggle(e.target.checked)} />
             {notify.push ? '답변 완료 알림 (앱을 닫아도)' : '답변 완료 시스템 알림'}
           </label>
+        )}
+        {onOpenMemoryGuide && (
+          <button type="button" onClick={onOpenMemoryGuide} className="sidebar-ext-link">메모리 활용 팁</button>
         )}
         {browserExt && (
           <button type="button" onClick={browserExt.onOpen} className="sidebar-ext-link">

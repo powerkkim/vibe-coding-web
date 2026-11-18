@@ -1,6 +1,6 @@
 # CLAUDE.md — vibe-coding-web 작업 안내
 
-Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-18 (앱 v0.7.0 기준).
+Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-18 (앱 v0.8.0 기준).
 
 ## 프로젝트
 
@@ -71,6 +71,11 @@ extension/                크롬 확장 "Vibe Coding 브라우저 도우미"(MV3
 - 처음 여는 사이트·위험해 보이는 동작의 확인은 앱이 받는다(`browserExt.ts` 의 `DANGER_RE`, 모델의 `needs_confirm`).
 - 확장을 고치면 `extension/manifest.json` 의 `version` 을 올리고, 앱이 새 기능을 필요로 하면 `MIN_EXTENSION_VERSION` 도 올린다.
 - 대화별 켜짐(`vibe_browser_chats`)·허용 사이트(`vibe_browser_sites`)는 localStorage 에만 둔다(드라이브 저장 형식 변경 없음).
+
+## 모델 옵션·기억 (v0.8.0)
+
+- 사용자가 고르는 옵션은 '생각 요약 보기'뿐이다(`ai.effectiveOptions`). 도구는 항상 켜고(대화 중 도구 목록이 바뀌면 캐시가 깨진다), 비용이 큰 빠른 모드·어드바이저·긴 캐시는 쓰지 않는다. 옵션을 다시 늘릴 때는 이 이유를 먼저 따진다.
+- 기억: 앱 도구 `user_memory`(memoryStore.runMemoryCommand)로 저장하고, 대화 시작 때 `memoryContext` 를 프로젝트 지침 블록에 붙여 넣는다. 대화마다 스냅숏을 고정한다(`memorySnapRef`). Anthropic `memory_20250818` 도구는 매 턴 확인 왕복이 생겨 쓰지 않는다.
 
 ## 저장 위치
 

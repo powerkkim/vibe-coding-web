@@ -11,6 +11,20 @@ import type { ClientToolResult } from './ai'
 
 export type MemoryFiles = Record<string, string>
 
+/** 시스템 프롬프트에 통째로 넣는 기억의 최대 글자 수(약 4천 토큰). 넘으면 파일 목록만 넣고 필요할 때 읽게 한다. */
+const INJECT_LIMIT = 12_000
+
+/** 대화 시작 때 시스템 프롬프트에 넣을 기억 블록. 비어 있으면 ''(아무것도 넣지 않음). */
+export function memoryContext(files: MemoryFiles): string {
+  const entries = Object.entries(files).filter(([, v]) => v.trim()).sort(([a], [b]) => a.localeCompare(b))
+  if (!entries.length) return ''
+  const total = entries.reduce((n, [k, v]) => n + k.length + v.length, 0)
+  const body = total <= INJECT_LIMIT
+    ? entries.map(([k, v]) => `<file path="${k}">\n${v.trim()}\n</file>`).join('\n')
+    : `The memory is large, so only the file list is shown. Use user_memory view to read a file when it matters for the request.\n${entries.map(([k, v]) => `- ${k} (${v.length} chars)`).join('\n')}`
+  return `<user_memory>\nThe user's saved long-term memory (preferences and rules they asked you to remember). Apply it when relevant.\n${body}\n</user_memory>`
+}
+
 const ROOT = '/memories'
 const LOCAL_KEY = 'vibe_memory'
 const DIRTY_KEY = 'vibe_memory_dirty'

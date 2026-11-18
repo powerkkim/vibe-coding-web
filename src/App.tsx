@@ -32,6 +32,7 @@ import { disablePush, enablePush, notifyHeader, pushEnabled, pushSupported, resy
 import { BROWSER_TOOL, browserOnForChat, detectExtension, isMobileDevice, MIN_EXTENSION_VERSION, runBrowserTool, setBrowserForChat, versionLess } from './services/browserExt'
 import type { ConfirmRequest } from './services/browserExt'
 import BrowserExtModal from './components/BrowserExtModal'
+import MemoryGuideModal from './components/MemoryGuideModal'
 import { attachmentBytes, REQUEST_ATTACH_LIMIT } from './services/fileExtract'
 import { RELEASE_NOTE } from './releaseNote'
 import { X } from './icons'
@@ -40,10 +41,10 @@ import ChatPanel from './components/ChatPanel'  // 좌측 채팅 패널
 import PreviewPanel from './components/PreviewPanel'  // 우측 코드 미리보기 패널
 import type { PanelTab } from './components/PreviewPanel'
 // AI 서비스 함수들 (스트리밍, 파싱, 모델 정보)
-import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, isBuildRequest, USE_GENERATION_SERVER, MODELS, DEFAULT_MODEL_OPTIONS } from './services/ai'
+import { streamCode, resumeCode, cancelGeneration, parseVibe, hideConfirmTag, contextBudget, longPromptThreshold, isBuildRequest, USE_GENERATION_SERVER, MODELS, effectiveOptions, MEMORY_TOOL } from './services/ai'
 import type { ClientToolResult, CodeMode, MessageDoc, ModelOptions, WebSource } from './services/ai'
 import { runEditorCommand } from './services/textEditor'
-import { runMemoryCommand } from './services/memoryStore'
+import { loadMemory, memoryContext, runMemoryCommand } from './services/memoryStore'
 import type { Message, MessageImage, TokenUsage } from './services/ai'
 import { addUsage, estimateCost, loadBalance, loadUsage, resetUsage, setBalance } from './services/usage'
 import type { Balance } from './services/usage'
@@ -329,6 +330,7 @@ export default function App() {
     return () => window.removeEventListener('focus', check)
   }, [])
   const [extModal, setExtModal] = useState(false)
+  const [memoryGuide, setMemoryGuide] = useState(false)
   // 화면의 대화에서 browser 도구를 켰는지(대화마다, 기본 끔). 새 대화에서 켜면 첫 전송 때 그 대화에 기록한다.
   const [browserOn, setBrowserOnState] = useState(false)
   const browserOnRef = useRef(false)
@@ -796,11 +798,13 @@ export default function App() {
     localStorage.setItem('vibe_model', nextModel)
   }
 
-  // 모델 옵션(노력 수준·빠른 모드·최대 출력·생각 요약). 모델마다 따로 기억한다.
+  // 모델 옵션: v0.8.0 부터 '생각 요약 보기'만 고르고 나머지(도구·노력·출력 한도 등)는 권장값 고정(effectiveOptions). 모델마다 따로 기억한다.
+  // 대화별 기억 스냅숏(이 세션 동안). 새로고침하면 다시 읽는다.
+  const memorySnapRef = useRef(new Map<string, string>())
   const [allModelOptions, setAllModelOptions] = useState<Record<string, ModelOptions>>(() => {
     try { return JSON.parse(localStorage.getItem('vibe_model_options') ?? '{}') ?? {} } catch { return {} }
   })
-  const modelOptions: ModelOptions = { ...DEFAULT_MODEL_OPTIONS, ...allModelOptions[activeModel] }
+  const modelOptions: ModelOptions = effectiveOptions(allModelOptions[activeModel])
   const handleModelOptionsChange = (next: ModelOptions) => {
     const all = { ...allModelOptions, [activeModel]: next }
     setAllModelOptions(all)
@@ -900,7 +904,7 @@ export default function App() {
   /** 앱이 실행하는 도구: 텍스트 에디터는 현재 프로젝트 사본에, 메모리는 드라이브/브라우저 기억에 적용한다. */
   const runClientTool = async (run: Run, name: string, input: Record<string, unknown>): Promise<ClientToolResult> => {
     const messages = run.messages
-    if (name === 'memory') return runMemoryCommand(input)
+    if (name === 'user_memory' || name === 'memory') return runMemoryCommand(input)
     if (name === 'app_status') {
       const on = (Object.entries({ 'web search': modelOptions.webSearch, 'web fetch': modelOptions.webFetch, 'partial edit (text editor)': modelOptions.textEditor, memory: modelOptions.memory, 'code execution': modelOptions.codeExecution }) as [string, boolean][])
         .filter(([, v]) => v).map(([k]) => k)
@@ -1132,6 +1136,14 @@ export default function App() {
     // 브라우저를 켠 대화인데 확장을 못 찾은 상태면 보내기 전에 한 번 더 찾아본다.
     if (browserOnForChat(run.chatId) && !extVersionRef.current) await checkExtension()
     const useBrowser = !!extVersionRef.current && browserOnForChat(run.chatId)
+    // 기억은 대화마다 처음 한 번 읽어 고정한다. 대화 중 새로 저장한 기억은 다음 대화부터 들어간다(바꾸면 캐시가 깨진다).
+    let memoryText = memorySnapRef.current.get(run.chatId)
+    if (memoryText === undefined) {
+      // 드라이브가 느리면 4초까지만 기다린다. 못 읽었으면 이번엔 빼고 다음 턴에 다시 읽는다.
+      const read = await Promise.race([loadMemory().then(memoryContext), new Promise<null>((r) => setTimeout(() => r(null), 4000))]).catch(() => null)
+      memoryText = read ?? ''
+      if (read !== null) memorySnapRef.current.set(run.chatId, read)
+    }
     if (isFg(run)) {
       setMessages(run.messages)
       setIsLoading(true)
@@ -1168,8 +1180,9 @@ export default function App() {
             onSource: (src) => handleSource(run, src),
             onFile: (id) => { if (!run.outputFiles.includes(id)) run.outputFiles.push(id) },
             onClientTool: (name, input) => runClientTool(run, name, input),
-            appTools: useBrowser ? [...APP_TOOLS, BROWSER_TOOL] : APP_TOOLS,
-            projectContext: projectContext(projects.find((p) => p.id === run.projectId)),
+            appTools: useBrowser ? [...APP_TOOLS, MEMORY_TOOL, BROWSER_TOOL] : [...APP_TOOLS, MEMORY_TOOL],
+            // 프로젝트 지침 + 기억(대화마다 처음 읽은 것을 고정해 캐시가 깨지지 않게 한다)
+            projectContext: [projectContext(projects.find((p) => p.id === run.projectId)), memoryText].filter(Boolean).join('\n\n') || undefined,
             codeMode,
             // 코드를 만들거나 고치라는 메시지일 때만 파일 전체를 보내고, 일반 대화에는 목록만 보낸다.
             filesMode: isBuildRequest(history[history.length - 1]?.content ?? '') ? 'full' : 'list',
@@ -1638,6 +1651,7 @@ export default function App() {
       version={__APP_VERSION__}
       note={RELEASE_NOTE}
       notify={notifySupported() ? { on: notifyOn, push: pushOn, onToggle: toggleNotify } : undefined}
+      onOpenMemoryGuide={() => setMemoryGuide(true)}
       browserExt={isMobileDevice() ? undefined : { version: extVersion, onOpen: () => setExtModal(true) }}
       error={storageError}
       onSelect={handleSelectChat}
@@ -1784,6 +1798,7 @@ export default function App() {
           />
         </div>
       </div>
+      {memoryGuide && <MemoryGuideModal onClose={() => setMemoryGuide(false)} />}
       {extModal && <BrowserExtModal version={extVersion} minVersion={MIN_EXTENSION_VERSION} onClose={() => setExtModal(false)} />}
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
