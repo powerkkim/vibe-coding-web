@@ -30,8 +30,13 @@ function blobToBase64(blob: Blob): Promise<string> {
   })
 }
 
+/** 이미지로 넣을 파일인지: Claude 가 받는 형식 + 브라우저가 그릴 수 있어 PNG 로 바꿀 형식(BMP·ICO·AVIF 등). SVG 는 글로 읽는다. */
+export function isImageFile(file: File): boolean {
+  return isSupported(file.type) || (file.type.startsWith('image/') && file.type !== 'image/svg+xml')
+}
+
 export async function readImage(file: File): Promise<MessageImage> {
-  if (!isSupported(file.type)) throw new Error('이미지(PNG, JPG, GIF, WebP)만 넣을 수 있어요')
+  if (!isImageFile(file)) throw new Error('이미지(PNG, JPG, GIF, WebP 등)만 넣을 수 있어요')
 
   let bitmap: ImageBitmap
   try {
@@ -41,8 +46,8 @@ export async function readImage(file: File): Promise<MessageImage> {
   }
   const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height))
 
-  // 줄일 필요가 없으면 원본을 그대로 쓴다(GIF 애니메이션도 유지된다).
-  if (scale === 1 && file.size <= MAX_BYTES) {
+  // 줄일 필요가 없으면 원본을 그대로 쓴다(GIF 애니메이션도 유지된다). 받지 않는 형식(BMP 등)은 아래에서 PNG 로 바꾼다.
+  if (scale === 1 && file.size <= MAX_BYTES && isSupported(file.type)) {
     bitmap.close()
     return { mediaType: file.type, data: await blobToBase64(file) }
   }
@@ -54,7 +59,7 @@ export async function readImage(file: File): Promise<MessageImage> {
   bitmap.close()
 
   // PNG 는 투명도를 지키기 위해 PNG 로, 나머지(GIF 는 첫 프레임)는 JPEG 로 다시 만든다.
-  const mediaType: MessageImage['mediaType'] = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
+  const mediaType: MessageImage['mediaType'] = file.type === 'image/png' || !isSupported(file.type) ? 'image/png' : 'image/jpeg'
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mediaType, JPEG_QUALITY))
   if (!blob) throw new Error(`이미지를 변환하지 못했어요: ${file.name}`)
   if (blob.size > MAX_BYTES) throw new Error(`이미지가 너무 커요(5MB 초과): ${file.name}`)

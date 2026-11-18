@@ -1,6 +1,6 @@
 # CLAUDE.md — vibe-coding-web 작업 안내
 
-Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-16 (앱 v0.6.0 기준).
+Claude(또는 사람)가 이 레포에서 작업할 때 따르는 규칙과 구조. 최종 수정 2026-11-18 (앱 v0.7.0 기준).
 
 ## 프로젝트
 
@@ -40,6 +40,7 @@ src/
     previewSandbox.ts     미리보기 격리(sandbox 설정, 저장소 대체 코드, 격리된 새 탭)
     notify.ts             답변 완료 시스템 알림(켜기·끄기, 서비스워커 알림)
     push.ts               웹 푸시(앱을 닫아도 오는 알림): 구독 등록·해제, 생성 요청의 X-Vibe-Notify 헤더
+    fileExtract.ts        첨부 파일 → 문서(MessageDoc): PDF, docx·xlsx·pptx·hwpx 글 추출, 텍스트(UTF-8/EUC-KR), 바이너리 거절
     browserExt.ts         크롬 확장과 통신, browser 도구 정의·실행(사이트 허용·위험 동작 확인)
     memoryStore.ts, usage.ts, localStore.ts …
   releaseNote.ts          사이드바 아래 한 줄 공지

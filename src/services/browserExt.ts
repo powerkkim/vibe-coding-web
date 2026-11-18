@@ -31,14 +31,28 @@ function send<T>(msg: unknown, timeoutMs = 60_000): Promise<T> {
   })
 }
 
-/** 확장 버전. 없거나 응답이 없으면 null. */
+/**
+ * 확장 버전. 없거나 응답이 없으면 null.
+ * 잠든 확장(서비스 워커 '비활성')은 깨어나는 데 시간이 걸릴 수 있어 넉넉히 기다리고 한 번 더 묻는다.
+ * 확장이 아예 없으면 크롬이 바로 오류를 돌려주므로 기다리지 않는다.
+ */
 export async function detectExtension(): Promise<string | null> {
   if (!runtime()?.sendMessage) return null
-  try {
-    const res = await send<{ ok?: boolean; version?: string }>({ type: 'ping' }, 1500)
-    return res?.ok && res.version ? res.version : null
-  } catch { return null }
+  for (const wait of [3000, 5000]) {
+    try {
+      const res = await send<{ ok?: boolean; version?: string }>({ type: 'ping' }, wait)
+      return res?.ok && res.version ? res.version : null
+    } catch (e) {
+      // 시간 초과만 다시 묻는다. 그 밖의 오류(설치 안 됨 등)는 바로 없음으로 본다.
+      if (!(e instanceof Error && e.message.includes('응답하지'))) return null
+    }
+  }
+  return null
 }
+
+/** 휴대폰·태블릿인지(창 너비가 아니라 기기로 판단). 확장은 데스크톱 크롬·엣지에서만 쓴다. */
+export const isMobileDevice = () =>
+  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 
 export function versionLess(a: string, b: string): boolean {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number)

@@ -1,3 +1,4 @@
+import { officeExtractor, PDF_LIMIT } from './fileExtract'
 import { currentAccessToken, DRIVE_API, DRIVE_UPLOAD, driveRequest, hasFileScope } from './drive'
 import type { MessageDoc, MessageImage } from './ai'
 import { readImage } from './image'
@@ -321,7 +322,6 @@ export async function pickDriveFile(): Promise<PickerDoc | null> {
 
 // ── 첨부(사진 첨부와 같은 방식) ───────────────────────────────
 // 고를 때는 이름·종류·크기만 받아 칩으로 보여주고, 메시지를 보낼 때 내용을 받아 그 메시지에 싣는다. 폴더는 만들지 않는다.
-const PDF_LIMIT = 10 * 1024 * 1024            // PDF 를 메시지에 직접 싣는 최대 크기
 const TEXT_INLINE_LIMIT = 100_000              // 텍스트를 직접 싣는 최대 글자 수. 넘으면 이름만 알리고 필요할 때 읽게 한다.
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
@@ -338,10 +338,19 @@ export async function loadAttachment(ref: PickerDoc): Promise<{ image?: MessageI
     if (blob.size > PDF_LIMIT) return { doc: { name: ref.name, kind: 'ref', size: blob.size, driveId: ref.id, mimeType: mime } }
     return { doc: { name: ref.name, kind: 'pdf', size: blob.size, data: await blobBase64(blob), driveId: ref.id, mimeType: mime } }
   }
+  // 드라이브에 올린 Word·Excel·PowerPoint·HWPX 파일: 받아서 글을 뽑는다(내 기기 첨부와 같은 방식).
+  // 구글 문서로 변환된 파일은 이름이 .docx 여도 아래 내보내기로 읽는다.
+  const office = mime.startsWith('application/vnd.google-apps') ? undefined : officeExtractor(ref.name, mime)
+  if (office) {
+    if ((ref.sizeBytes ?? 0) > PDF_LIMIT * 3) return { doc: { name: ref.name, kind: 'ref', size: ref.sizeBytes ?? 0, driveId: ref.id, mimeType: mime } }
+    const text = await office(await fetchContent(ref.id, mime)).catch(() => { throw new Error(`${ref.name}: 파일 내용을 읽지 못했어요`) })
+    const cut = text.length > TEXT_INLINE_LIMIT
+    return { doc: { name: ref.name, kind: 'text', size: text.length, text: cut ? `${text.slice(0, TEXT_INLINE_LIMIT)}\n\n... (앞 ${TEXT_INLINE_LIMIT.toLocaleString()}자만 실었습니다)` : text, driveId: ref.id, mimeType: mime } }
+  }
   const exp = GOOGLE_EXPORT[mime]
   const name = exp && !ref.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${ref.name}.${exp.ext}` : ref.name
   if (!exp && !TEXT_EXT.test(ref.name) && !mime.startsWith('text/') && mime !== 'application/json') {
-    throw new Error(`${ref.name}: 이 형식은 첨부할 수 없어요 (PDF·이미지·텍스트·Google 문서/시트/슬라이드만)`)
+    throw new Error(`${ref.name}: 이 형식은 첨부할 수 없어요 (PDF·이미지·텍스트·Word/Excel/PowerPoint·Google 문서/시트/슬라이드)`)
   }
   const text = await (await fetchContent(ref.id, mime)).text()
   if (text.length > TEXT_INLINE_LIMIT) return { doc: { name, kind: 'ref', size: text.length, driveId: ref.id, mimeType: mime } }
@@ -352,7 +361,9 @@ export async function loadAttachment(ref: PickerDoc): Promise<{ image?: MessageI
 export async function readAttachmentText(doc: MessageDoc, maxChars = 30_000): Promise<string> {
   if (!doc.driveId) throw new Error('드라이브 파일 정보가 없습니다')
   if (doc.mimeType === 'application/pdf') throw new Error('PDF 가 커서(10MB 초과) 읽을 수 없습니다. 필요한 부분만 나눠 첨부해 주세요')
-  const text = await (await fetchContent(doc.driveId, doc.mimeType)).text()
+  const office = doc.mimeType?.startsWith('application/vnd.google-apps') ? undefined : officeExtractor(doc.name, doc.mimeType)
+  const blob = await fetchContent(doc.driveId, doc.mimeType)
+  const text = office ? await office(blob) : await blob.text()
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n... (truncated, ${text.length} chars total)` : text
 }
 
