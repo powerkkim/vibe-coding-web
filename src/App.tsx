@@ -29,9 +29,10 @@ import type { ChatListItem as ChatSummary, StoredChat } from './services/chatSto
 import { useEscapeKey } from './hooks/useEscapeKey'
 import { notifyEnabled, notifySupported, onNotificationOpen, setNotifyEnabled, showSystemNotification } from './services/notify'
 import { disablePush, enablePush, notifyHeader, pushEnabled, pushSupported, resyncPush } from './services/push'
-import { BROWSER_TOOL, browserOnForChat, detectExtension, MIN_EXTENSION_VERSION, runBrowserTool, setBrowserForChat, versionLess } from './services/browserExt'
+import { BROWSER_TOOL, browserOnForChat, detectExtension, isMobileDevice, MIN_EXTENSION_VERSION, runBrowserTool, setBrowserForChat, versionLess } from './services/browserExt'
 import type { ConfirmRequest } from './services/browserExt'
 import BrowserExtModal from './components/BrowserExtModal'
+import { attachmentBytes, REQUEST_ATTACH_LIMIT } from './services/fileExtract'
 import { RELEASE_NOTE } from './releaseNote'
 import { X } from './icons'
 import Header from './components/Header'  // 상단 헤더 (로고, 설정, API 키)
@@ -311,8 +312,18 @@ export default function App() {
   // 확장이 있으면 버전, 없으면 null. 창으로 돌아올 때마다 다시 확인한다(설치·삭제를 바로 반영).
   const [extVersion, setExtVersion] = useState<string | null>(null)
   const extVersionRef = useRef<string | null>(null)
+  // 한 번 찾은 뒤에는 연달아 두 번 못 찾을 때만 '없음'으로 바꾼다(잠깐 응답이 늦어 버튼이 사라지지 않게).
+  const extMissRef = useRef(0)
+  const checkExtension = async () => {
+    const v = await detectExtension()
+    if (v) extMissRef.current = 0
+    else if (extVersionRef.current && ++extMissRef.current < 2) return extVersionRef.current
+    extVersionRef.current = v
+    setExtVersion(v)
+    return v
+  }
   useEffect(() => {
-    const check = () => detectExtension().then((v) => { extVersionRef.current = v; setExtVersion(v) })
+    const check = () => { void checkExtension() }
     check()
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
@@ -974,7 +985,7 @@ export default function App() {
       return { content: 'A popup asking the user to connect Google Drive is now shown. Tell them to press "Google 드라이브 연결" in it; this chat and earlier ones will then be saved to Drive automatically.' }
     }
     if (name === 'browser') {
-      if (!extVersionRef.current) return { content: 'The Vibe Coding Chrome extension is not connected anymore. Tell the user to open the app in Chrome with the extension installed.', isError: true }
+      // 연결 판정이 잠깐 '없음'이어도 실제 호출을 시도한다. 정말 없으면 runBrowserTool 이 연결 안 됨 오류를 돌려준다.
       return runBrowserTool(input, (req) => requestConfirm(run, req), (line) => handleActivity(run, line))
     }
     if (name === 'project_files') return runProjectFiles(run, input)
@@ -1023,13 +1034,14 @@ export default function App() {
    *    - 에러 메시지를 채팅에 표시 (429·5xx 는 시작을 2회 다시 시도한 뒤 도달)
    */
   // 끼어들어 말하기: 생성 중에 보내면 지금 답변을 멈추고(받은 부분은 남김) 멈춤 처리가 끝난 뒤 새 메시지를 보낸다.
-  const interruptRef = useRef<{ prompt: string; images: MessageImage[] } | null>(null)
-  const handleInterrupt = (prompt: string, images: MessageImage[] = []) => {
-    // 멈춤 처리가 끝나기 전에 또 보내면 덮어쓰지 않고 이어 붙인다.
+  type Pending = { prompt: string; images: MessageImage[]; driveFiles: PickerDoc[]; docs: MessageDoc[] }
+  const interruptRef = useRef<Pending | null>(null)
+  const handleInterrupt = (prompt: string, images: MessageImage[] = [], driveFiles: PickerDoc[] = [], docs: MessageDoc[] = []) => {
+    // 멈춤 처리가 끝나기 전에 또 보내면 덮어쓰지 않고 이어 붙인다. 첨부(드라이브·내 기기 파일)도 함께 넘긴다.
     const prev = interruptRef.current
     interruptRef.current = prev
-      ? { prompt: [prev.prompt, prompt].filter(Boolean).join('\n\n'), images: [...prev.images, ...images] }
-      : { prompt, images }
+      ? { prompt: [prev.prompt, prompt].filter(Boolean).join('\n\n'), images: [...prev.images, ...images], driveFiles: [...prev.driveFiles, ...driveFiles], docs: [...prev.docs, ...docs] }
+      : { prompt, images, driveFiles, docs }
     if (!prev) handleStop()
   }
   // 대화를 바꾸면 leaveForeground 가 대기 중인 끼어들기를 비운다(다른 대화로 보내지지 않게).
@@ -1037,25 +1049,31 @@ export default function App() {
     if (isLoading || !interruptRef.current) return
     const next = interruptRef.current
     interruptRef.current = null
-    handleSend(next.prompt, next.images)
+    handleSend(next.prompt, next.images, messages, next.driveFiles, next.docs)
   }, [isLoading])
 
   const [attachError, setAttachError] = useState('')
-  const handleSend = async (prompt: string, images: MessageImage[] = [], base: Message[] = messages, driveFiles: PickerDoc[] = []) => {
+  const handleSend = async (prompt: string, images: MessageImage[] = [], base: Message[] = messages, driveFiles: PickerDoc[] = [], localDocs: MessageDoc[] = []) => {
     if (!activeApiKey) return
-    if (isLoading) return handleInterrupt(prompt, images)
-    // 드라이브 첨부는 보낼 때 내용을 받는다: 이미지는 사진 첨부와 같게, PDF·문서는 문서 블록으로 이 메시지에 싣는다.
-    let docs: MessageDoc[] = []
+    if (isLoading) return handleInterrupt(prompt, images, driveFiles, localDocs)
+    // 내 기기 첨부는 고를 때 이미 읽어 둔 문서다. 드라이브 첨부는 보낼 때 내용을 받는다: 이미지는 사진 첨부와 같게, PDF·문서는 문서 블록으로.
+    let docs: MessageDoc[] = [...localDocs]
     if (driveFiles.length) {
       setAttachError('')
       try {
         const loaded = await Promise.all(driveFiles.map(loadAttachment))
         images = [...images, ...loaded.flatMap((l) => (l.image ? [l.image] : []))]
-        docs = loaded.flatMap((l) => (l.doc ? [l.doc] : []))
+        docs = [...docs, ...loaded.flatMap((l) => (l.doc ? [l.doc] : []))]
       } catch (e) {
         setAttachError(e instanceof Error ? e.message : '첨부 파일을 받지 못했어요')
         return
       }
+    }
+    // 첨부가 쌓여 요청이 API 한도를 넘을 것 같으면 보내기 전에 막는다(이전 메시지의 첨부도 매번 다시 보낸다).
+    const attachTotal = attachmentBytes([...base, { images, docs }])
+    if ((images.length || docs.length) && attachTotal > REQUEST_ATTACH_LIMIT) {
+      setAttachError(`이 대화에 쌓인 첨부가 너무 커요(약 ${Math.round(attachTotal / 1024 / 1024)}MB, 한도 ${REQUEST_ATTACH_LIMIT / 1024 / 1024}MB). 새 대화에서 첨부하거나 파일을 나눠 주세요`)
+      return
     }
     // 이미지만 보내고 글을 비우면 기본 요청을 넣는다. API 는 빈 텍스트 블록을 받지 않는다.
     const userMsg: Message = {
@@ -1111,6 +1129,8 @@ export default function App() {
     syncRunning()
     // 화면의 대화에서 브라우저를 켜 두었으면 이 대화에 기록하고 browser 도구를 싣는다(확장이 있을 때만).
     if (isFg(run) && browserOnRef.current) setBrowserForChat(run.chatId, true)
+    // 브라우저를 켠 대화인데 확장을 못 찾은 상태면 보내기 전에 한 번 더 찾아본다.
+    if (browserOnForChat(run.chatId) && !extVersionRef.current) await checkExtension()
     const useBrowser = !!extVersionRef.current && browserOnForChat(run.chatId)
     if (isFg(run)) {
       setMessages(run.messages)
@@ -1618,7 +1638,7 @@ export default function App() {
       version={__APP_VERSION__}
       note={RELEASE_NOTE}
       notify={notifySupported() ? { on: notifyOn, push: pushOn, onToggle: toggleNotify } : undefined}
-      browserExt={isMobile ? undefined : { version: extVersion, onOpen: () => setExtModal(true) }}
+      browserExt={isMobileDevice() ? undefined : { version: extVersion, onOpen: () => setExtModal(true) }}
       error={storageError}
       onSelect={handleSelectChat}
       onNew={handleNewChat}
@@ -1679,7 +1699,7 @@ export default function App() {
           <ChatPanel
             chatKey={chatId ?? 'new'}
             messages={messages}
-            onSend={(p, imgs, files) => handleSend(p, imgs, messages, files)}
+            onSend={(p, imgs, files, docs) => handleSend(p, imgs, messages, files, docs)}
             attachError={attachError}
             codeMode={codeMode}
             onCodeModeChange={setCodeMode}
@@ -1700,7 +1720,7 @@ export default function App() {
                 </div>
               )
             })()}
-            browser={extVersion && !isMobile ? { on: browserOn, onToggle: toggleBrowser, outdated: versionLess(extVersion, MIN_EXTENSION_VERSION) } : undefined}
+            browser={extVersion && !isMobileDevice() ? { on: browserOn, onToggle: toggleBrowser, outdated: versionLess(extVersion, MIN_EXTENSION_VERSION) } : undefined}
             projectName={currentProject?.name}
             onOpenProject={() => currentProject && setProjectModal(currentProject)}
             onStop={handleStop}

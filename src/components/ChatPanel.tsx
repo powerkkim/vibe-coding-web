@@ -1,10 +1,11 @@
 ﻿import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowUp, ChevronDown, AlertCircle, FileText, ImagePlus, X, Square, History } from '../icons'
+import { ArrowUp, ChevronDown, AlertCircle, FileText, Paperclip, X, Square, History } from '../icons'
 import AnswerView from './AnswerView'
-import type { CodeMode, Message, MessageImage, TokenUsage } from '../services/ai'
+import type { CodeMode, Message, MessageDoc, MessageImage, TokenUsage } from '../services/ai'
 import type { PickerDoc } from '../services/driveExport'
-import { imageSrc, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
+import { imageSrc, isImageFile, MAX_IMAGES_PER_MESSAGE, readImage } from '../services/image'
+import { attachmentBytes, MAX_DOCS_PER_MESSAGE, readLocalDoc, REQUEST_ATTACH_LIMIT } from '../services/fileExtract'
 import { formatUsd, remainingBalance } from '../services/usage'
 import { GoogleDrive, Globe } from '../icons'
 import { downloadOutputFile } from '../services/ai'
@@ -26,7 +27,7 @@ const BILLING_URL = 'https://platform.claude.com/dashboard'
  */
 interface Props {
   messages: Message[]
-  onSend: (prompt: string, images: MessageImage[], driveFiles?: PickerDoc[]) => void
+  onSend: (prompt: string, images: MessageImage[], driveFiles?: PickerDoc[], docs?: MessageDoc[]) => void
   // 생성 중에 전송 버튼 자리의 중지 버튼이 부른다.
   onStop: () => void
   // 오류로 끊긴 마지막 답변의 질문을 다시 보낸다.
@@ -195,6 +196,9 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
   }
   const [imageError, setImageError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // 내 기기에서 고른 문서(PDF·오피스·텍스트 등). 고를 때 바로 읽어 둔다.
+  const [docs, setDocs] = useState<MessageDoc[]>([])
+  const [reading, setReading] = useState(0)
 
   // ── 스크롤 ──
   // 맨 아래 근처를 보고 있을 때만 새 내용을 따라 내려간다(follow). 사용자가 위로 올리면 멈추고 '맨 아래로' 버튼을 띄운다.
@@ -252,25 +256,53 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
     if (added.length > 0) setImages((prev) => [...prev, ...added].slice(0, MAX_IMAGES_PER_MESSAGE))
   }
 
-  // 클립보드에 이미지가 있을 때만 가로채고, 글자 붙여넣기는 그대로 둔다.
+  // 파일 첨부(📎·붙여넣기·끌어다 놓기): 이미지는 사진으로, 나머지는 읽어서 문서로 싣는다. 읽지 못하는 형식은 이유를 알린다.
+  const addFiles = async (files: File[]) => {
+    if (files.length === 0) return
+    setImageError('')
+    const imgs = files.filter(isImageFile)
+    const others = files.filter((f) => !isImageFile(f))
+    if (imgs.length) await addImageFiles(imgs)
+    if (!others.length) return
+    const room = MAX_DOCS_PER_MESSAGE - docs.length
+    const errors: string[] = []
+    if (others.length > room) errors.push(`파일은 메시지당 최대 ${MAX_DOCS_PER_MESSAGE}개까지 넣을 수 있어요 (${others.slice(Math.max(0, room)).map((f) => f.name).join(', ')} 제외)`)
+    const added: MessageDoc[] = []
+    setReading((n) => n + 1)
+    try {
+      for (const file of others.slice(0, Math.max(0, room))) {
+        try { added.push(await readLocalDoc(file)) } catch (err) { errors.push(err instanceof Error ? err.message : `${file.name}: 읽지 못했어요`) }
+      }
+    } finally { setReading((n) => n - 1) }
+    if (added.length) setDocs((prev) => [...prev, ...added].slice(0, MAX_DOCS_PER_MESSAGE))
+    if (errors.length) setImageError(errors.join(' / '))
+  }
+
+  // 클립보드에 파일이 있을 때만 가로채고, 글자 붙여넣기는 그대로 둔다.
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(e.clipboardData.files)
     if (files.length === 0) return
     e.preventDefault()
-    void addImageFiles(files)
+    void addFiles(files)
   }
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
-    void addImageFiles(Array.from(e.dataTransfer.files))
+    void addFiles(Array.from(e.dataTransfer.files))
   }
 
   const submit = () => {
     const t = input.trim()
     // 생성 중에 보내면 '끼어들어 말하기': 지금 답변을 멈추고 이 메시지를 이어서 보낸다(App 이 처리).
-    if ((!t && images.length === 0 && driveFiles.length === 0) || !hasApiKey) return
+    if ((!t && images.length === 0 && driveFiles.length === 0 && docs.length === 0) || !hasApiKey || reading > 0) return
+    // 첨부가 쌓여 API 요청 한도를 넘을 것 같으면 보내지 않고(첨부는 그대로 둔다) 알린다. 드라이브 첨부는 크기로 어림한다.
+    const total = attachmentBytes([...messages, { images, docs }]) + driveFiles.reduce((n, f) => n + Math.min(f.sizeBytes ?? 0, 10 * 1024 * 1024) * 1.37, 0)
+    if ((images.length || docs.length || driveFiles.length) && total > REQUEST_ATTACH_LIMIT) {
+      setImageError(`이 대화에 쌓인 첨부가 너무 커요(약 ${Math.round(total / 1024 / 1024)}MB, 한도 ${REQUEST_ATTACH_LIMIT / 1024 / 1024}MB). 새 대화에서 첨부하거나 파일을 나눠 주세요`)
+      return
+    }
     followRef.current = true   // 내가 보낸 메시지와 그 답변은 따라간다
-    onSend(t, images, driveFiles); setInput(''); setImages([]); setDriveFiles([]); setImageError('')
+    onSend(t, images, driveFiles, docs); setInput(''); setImages([]); setDriveFiles([]); setDocs([]); setImageError('')
     if (taRef.current) taRef.current.style.height = 'auto'
   }
 
@@ -284,8 +316,8 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
     e.target.style.height = Math.min(e.target.scrollHeight, 180) + 'px'
   }
 
-  const hasDraft = !!input.trim() || images.length > 0 || driveFiles.length > 0
-  const canSend = hasDraft && hasApiKey
+  const hasDraft = !!input.trim() || images.length > 0 || driveFiles.length > 0 || docs.length > 0
+  const canSend = hasDraft && hasApiKey && reading === 0
   // 생성 중 + 입력 없음 → 정지 버튼, 생성 중 + 입력 있음 → 끼어들어 보내기
   const interrupting = isLoading && hasDraft
 
@@ -331,6 +363,21 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
               ))}
             </div>
           )}
+          {(docs.length > 0 || reading > 0) && (
+            <div className="flex flex-wrap gap-2" style={{ padding: '10px 12px 0' }}>
+              {docs.map((d, k) => (
+                <span key={`${d.name}-${k}`} className="file-chip" title={d.name}>
+                  <span aria-hidden="true">{fileIcon(d.name, d.mimeType)}</span>
+                  <span className="truncate">{d.name}</span>
+                  <span className="file-chip-size">{fmtSize(d.size)}</span>
+                  <button onClick={() => setDocs((prev) => prev.filter((_, j) => j !== k))} aria-label={`${d.name} 첨부 빼기`} className="file-chip-x">
+                    <X style={{ width: 12, height: 12 }} />
+                  </button>
+                </span>
+              ))}
+              {reading > 0 && <span className="file-chip" aria-live="polite">파일 읽는 중…</span>}
+            </div>
+          )}
           {images.length > 0 && (
             <div className="flex flex-wrap gap-2" style={{ padding: '10px 12px 0' }}>
               {images.map((img, k) => (
@@ -371,14 +418,13 @@ export default function ChatPanel({ chatKey, contextTokens, contextBudget, price
                 </button>
               )}
               <button onClick={() => fileInputRef.current?.click()}
-                disabled={!hasApiKey || images.length >= MAX_IMAGES_PER_MESSAGE}
-                aria-label="이미지 추가 (붙여넣기·끌어다 놓기도 됩니다)"
+                disabled={!hasApiKey}
+                aria-label="파일 첨부: 이미지·PDF·Word·Excel·PowerPoint·HWPX·텍스트·코드 (붙여넣기·끌어다 놓기도 됩니다)"
                 className="icon-btn tip-up">
-                <ImagePlus style={{ width: 16, height: 16 }} />
+                <Paperclip style={{ width: 16, height: 16 }} />
               </button>
               <input ref={fileInputRef} type="file" hidden multiple
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                onChange={(e) => { void addImageFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} />
+                onChange={(e) => { void addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} />
               <span className="hidden md:inline" style={{ color: 'var(--txt-3)', fontSize: 'var(--fs-xs)' }}>
                 Shift+Enter 줄바꿈
               </span>
